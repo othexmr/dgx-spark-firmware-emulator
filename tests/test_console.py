@@ -11,17 +11,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.console import CHARS, send_text  # noqa: E402
+from tools.console import CHARS, send_text, type_line  # noqa: E402
 
 
 class Recorder:
-    """Stands in for the QMP client and records the key names sent."""
+    """Stands in for a QMP transport and records the key names sent."""
 
     def __init__(self):
         self.sent = []
+        self.calls = []
 
     def key(self, names, hold_ms=30):
         self.sent.extend(names)
+
+    def request(self, command, arguments=None):
+        self.calls.append((command, arguments))
+        if command == "send-key":
+            self.sent.extend(key["data"] for key in arguments["keys"])
 
 
 class ConsoleKeyTests(unittest.TestCase):
@@ -46,6 +52,26 @@ class ConsoleKeyTests(unittest.TestCase):
         recorder = Recorder()
         self.assertEqual(send_text(recorder, "abc", 0), 3)
         self.assertEqual(len(recorder.sent), 3)
+
+
+class TypeLineTests(unittest.TestCase):
+    """Typing goes through the transport's `request`, which is the API the runner's QMP object has.
+
+    The first version called a `key` method that only this module's client had, and it failed the
+    moment it ran against the real transport — the stand-in here speaks only `request`, so the same
+    mistake cannot pass again.
+    """
+
+    def test_each_character_becomes_a_send_key_request(self):
+        recorder = Recorder()
+        self.assertEqual(type_line(recorder, "a:"), 3)
+        self.assertEqual([call[0] for call in recorder.calls], ["send-key"] * 3)
+        self.assertEqual(recorder.sent, ["a", "shift", "semicolon", "ret"])
+
+    def test_the_enter_is_part_of_the_line(self):
+        recorder = Recorder()
+        type_line(recorder, "")
+        self.assertEqual(recorder.sent, ["ret"])
 
 
 if __name__ == "__main__":

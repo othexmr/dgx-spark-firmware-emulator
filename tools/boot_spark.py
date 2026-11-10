@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.build_monitor import NOR_SIZES, build_monitor
 from tools.download_firmware import require_ignored_untracked
-from tools.console import keys_for
+from tools.console import type_line
 from tools.dxe_protocols import inspect_protocols
 from tools.handoff import boot_arguments
 from tools.prepare_mm import MM_SHA256, prepare_mm
@@ -500,9 +500,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                         # Type the whole script, one key at a time, the way a keyboard would. The
                         # guest's serial FIFO is small and TCG is slow, so each key waits.
                         for line in script:
-                            for character in line + "\n":
-                                qmp.key(keys_for(character))
-                                time.sleep(console_delay)
+                            type_line(qmp, line, console_delay)
                             time.sleep(console_delay * 10)
                         record["console_script"] = {"lines": len(script),
                                                    "typed_at": round(now, 3)}

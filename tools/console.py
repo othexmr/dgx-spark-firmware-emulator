@@ -84,6 +84,23 @@ def keys_for(character: str) -> list[str]:
     return [name]
 
 
+def type_line(qmp, line: str, delay: float = 0.0, sleep=time.sleep) -> int:
+    """Type one line plus Enter through any object that speaks QMP's `request`.
+
+    `qmp` is duck-typed on purpose: the standalone client here and the boot runner's own transport are
+    different classes, and both must be able to drive a console.
+    """
+    sent = 0
+    for character in line + "\n":
+        keys = keys_for(character)
+        qmp.request("send-key", {"keys": [{"type": "qcode", "data": name} for name in keys],
+                                 "hold-time": 30})
+        sent += 1
+        if delay:
+            sleep(delay)
+    return sent
+
+
 def send_text(qmp: Qmp, text: str, delay: float) -> int:
     for character in text:
         qmp.key(keys_for(character))
