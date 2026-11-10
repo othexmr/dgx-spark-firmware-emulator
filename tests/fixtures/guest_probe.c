@@ -1,29 +1,32 @@
 /* SPDX-License-Identifier: Apache-2.0
- * A guest-side probe used as `/init`: it mounts what it needs, prints a few answers, and stops.
+ * A guest-side probe used as `/init`: it mounts what it needs, loads the modules the vendor init
+ * would have loaded, prints a few answers, and stops.
  *
- * Injection: the kernel unpacks the external initrd *after* the embedded one, so appending this
- * binary as `/init` to the vendor's INITRD shadows the vendor init — measured, and with a
- * consequence worth knowing: the vendor init is what loads the kernel modules, so a probe that
- * replaces it also removes the NVMe driver from the boot. Use it to read state that exists without
- * userspace, or hand control back once you know where the vendor init lives.
+ * Why it is a static ELF: the vendor kernel's own `/init` lives in an embedded initramfs with no
+ * shell on any path an injected image can reach (`/bin`, `/sbin` and `/usr/bin` do not exist, and `/`
+ * refuses O_DIRECTORY), so `init=/bin/sh` is ignored and a script has nothing to interpret it. Raw
+ * syscalls only, no libc.
  *
- * The vendor kernel's own `/init` lives in an embedded initramfs with no shell on any path this
- * image can reach, so a diagnostic cannot be a script — it has to be a static ELF that speaks to the
- * kernel directly. This is that: raw syscalls only, no libc, no assumptions about what the rest of
- * the rootfs contains.
+ * Why it loads modules: replacing `/init` also removes the userspace that loads them, and without
+ * them no PCIe driver probes — which is exactly the behaviour this probe exists to observe. The
+ * `.ko` files are expanded on the host before the archive is built, because a freestanding binary
+ * cannot decompress zstd.
  *
- * It answers one question, the one the emulator could not: why does a PCIe function's driver return
- * -EPROBE_DEFER after the guest has enumerated it? `/sys/kernel/debug/devices_deferred` names the
- * device and what it is waiting for.
+ * It answers one question: why does the NVMe driver return -EPROBE_DEFER for a device the guest has
+ * already enumerated? Measured, and not what the code alone suggests: the device carries **no
+ * `supplier:*` device links**, so it is not waiting on the SMMU or on any other device. The deferral
+ * comes from the driver's own probe, the kernel's `deferred_probe_timeout` eventually "ignores the
+ * dependency", and the probe then succeeds — which is why the loader sets that timeout to one second.
  */
-#define SYS_openat   56
-#define SYS_close    57
-#define SYS_read     63
-#define SYS_write    64
-#define SYS_mount    40
-#define SYS_mkdirat  34
-#define SYS_getdents64 61
-#define SYS_nanosleep 101
+#define SYS_mount        40
+#define SYS_mkdirat      34
+#define SYS_openat       56
+#define SYS_close        57
+#define SYS_getdents64   61
+#define SYS_read         63
+#define SYS_write        64
+#define SYS_nanosleep   101
+#define SYS_finit_module 273
 
 static long sys(long number, long a, long b, long c, long d, long e, long f)
 {
@@ -51,18 +54,31 @@ static void puts_(const char *s)
     sys(SYS_write, 1, (long)s, (long)length(s), 0, 0, 0);
 }
 
-/* List a directory. The vendor init and its shell are somewhere in this rootfs, and which paths
- * exist decides whether an injected init can hand work back to them. */
+static void show_number(const char *label, long value)
+{
+    char digits[24];
+    int i = 23;
+    int negative = value < 0;
+    unsigned long v = negative ? -(unsigned long)value : (unsigned long)value;
+    digits[i] = 0;
+    if (!v) digits[--i] = '0';
+    while (v) { digits[--i] = (char)('0' + v % 10); v /= 10; }
+    puts_(label);
+    if (negative) puts_("-");
+    puts_(&digits[i]);
+}
+
+/* List a directory with plain O_RDONLY: O_DIRECTORY is refused (EINVAL) on this rootfs, and
+ * getdents does not need it. The PCI device's directory carries its `supplier:*` links, which is the
+ * only place the kernel names what a deferred probe is waiting for. */
 static void list(const char *path)
 {
-    char buffer[2048];
+    char buffer[4096];
     puts_("\n--- ls ");
     puts_(path);
-    puts_("\n");
-    /* O_RDONLY|O_DIRECTORY */
-    long fd = sys(SYS_openat, -100, (long)path, 0x10000, 0, 0, 0);
+    long fd = sys(SYS_openat, -100, (long)path, 0, 0, 0, 0);
     if (fd < 0) {
-        puts_("(cannot open)\n");
+        show_number(" (open returned ", fd);
         return;
     }
     long got;
@@ -71,20 +87,19 @@ static void list(const char *path)
             unsigned short reclen = *(unsigned short *)(buffer + i + 16);
             const char *name = buffer + i + 19;
             if (name[0] != '.') {
-                puts_(name);
                 puts_(" ");
+                puts_(name);
             }
             i += reclen;
         }
     }
     sys(SYS_close, fd, 0, 0, 0, 0, 0);
-    puts_("\n");
 }
 
 static void show(const char *path)
 {
     char buffer[4096];
-    long fd = sys(SYS_openat, -100 /* AT_FDCWD */, (long)path, 0, 0, 0, 0);
+    long fd = sys(SYS_openat, -100, (long)path, 0, 0, 0, 0);
     puts_("\n--- ");
     puts_(path);
     puts_("\n");
@@ -98,59 +113,60 @@ static void show(const char *path)
     sys(SYS_close, fd, 0, 0, 0, 0, 0);
 }
 
-static void show_number(const char *label, long value)
-{
-    char digits[24];
-    int i = 23;
-    digits[i] = 0;
-    int negative = value < 0;
-    unsigned long v = negative ? -(unsigned long)value : (unsigned long)value;
-    if (!v) digits[--i] = '0';
-    while (v) { digits[--i] = (char)('0' + v % 10); v /= 10; }
-    puts_(label);
-    if (negative) puts_("-");
-    puts_(&digits[i]);
-    puts_("\n");
-}
-
 static void mount_(const char *type, const char *target)
 {
     sys(SYS_mkdirat, -100, (long)target, 0755, 0, 0, 0);   /* EEXIST is fine */
-    show_number("mount ", sys(SYS_mount, (long)type, (long)target, (long)type, 0, 0, 0));
+    long result = sys(SYS_mount, (long)type, (long)target, (long)type, 0, 0, 0);
+    puts_("\nmount ");
     puts_(target);
-    puts_("\n");
+    show_number(" -> ", result);
+}
+
+static void load(const char *path)
+{
+    long fd = sys(SYS_openat, -100, (long)path, 0, 0, 0, 0);
+    puts_("\nfinit_module ");
+    puts_(path);
+    if (fd < 0) {
+        puts_(" (cannot open)");
+        return;
+    }
+    show_number(" -> ", sys(SYS_finit_module, fd, (long)"", 0, 0, 0, 0));
+    sys(SYS_close, fd, 0, 0, 0, 0, 0);
+}
+
+static void nap(long seconds)
+{
+    struct { long sec; long nsec; } nap = {seconds, 0};
+    sys(SYS_nanosleep, (long)&nap, 0, 0, 0, 0, 0);
 }
 
 void start_c(void)
 {
-    puts_("\n=== GUEST-PROBE-BEGIN\n");
+    puts_("\n=== GUEST-PROBE-BEGIN");
     mount_("proc", "/proc");
     mount_("sysfs", "/sys");
     mount_("debugfs", "/sys/kernel/debug");
     show("/proc/cmdline");
-    list("/");
-    list("/bin");
-    list("/sbin");
-    list("/usr/bin");
-    /* The question is what the drivers found, so the probe has to be alive when they run: the NVMe
-     * module registers ~12.7 s into this boot, and asking at 4 s finds an empty deferred list simply
-     * because nothing has probed yet. Wait past it. */
-    puts_("\n--- waiting 45 s for the drivers to probe\n");
-    { struct { long sec; long nsec; } nap = {45, 0};
-      sys(SYS_nanosleep, (long)&nap, 0, 0, 0, 0, 0); }
+    /* The vendor userspace is what loads the drivers, and replacing /init removed it. */
+    load("/nvme-keyring.ko");
+    load("/hkdf.ko");
+    load("/nvme-auth.ko");
+    load("/nvme-core.ko");
+    load("/nvme.ko");
+    /* Read the list while the device is still waiting: once the deferred-probe timeout expires the
+     * kernel "ignores the dependency" and probes anyway, which erases the evidence. */
+    nap(2);
+    show("/sys/kernel/debug/devices_deferred");
+    list("/sys/bus/pci/devices/000f:00:02.0");
+    puts_("\n--- waiting 20 s for the probes");
+    nap(20);
     show("/sys/kernel/debug/devices_deferred");
     show("/sys/bus/pci/devices/000f:00:02.0/driver");
-    show("/sys/bus/pci/devices/000f:00:02.0/modalias");
     show("/sys/bus/pci/devices/000f:00:02.0/irq");
-    show("/sys/bus/pci/devices/000f:00:03.0/driver");
-    show("/sys/bus/pci/devices/000f:00:02.0/vendor");
-    show("/sys/bus/pci/devices/000f:00:02.0/class");
-    show("/sys/kernel/iommu_groups");
+    show("/sys/kernel/iommu_groups/groups");
     puts_("\n=== GUEST-PROBE-END\n");
-    for (;;) {
-        struct { long seconds; long nanos; } pause = {3600, 0};
-        sys(SYS_nanosleep, (long)&pause, 0, 0, 0, 0, 0);
-    }
+    for (;;) nap(3600);
 }
 
 __attribute__((naked)) void _start(void)

@@ -243,10 +243,16 @@ Measured with the injected probe and the modules loaded by hand from the archive
 - with `deferred_probe_timeout=1` on the command line, the vendor flow binds **both** controllers at
   9 s (`nvme nvme0: pci function 000f:00:02.0`, `nvme nvme1: …`) and `nvme0n1` appears.
 
-So the `-517` is an unresolved device link, not a broken device: the vendor's IORT declares three
-SMMUv3 units at `0x13000000`, `0x13800000` and `0x14900000`, the profile backs none of them, and the
-kernel's own timeout is what saves the boot. Collapsing the timeout is a workaround with a date on it;
-modelling the SMMU is the fix.
+So the `-517` is the driver's own probe, not a missing device behind it: the PCI function's sysfs
+directory carries **no `supplier:*` links**, so it is not waiting on the SMMU — or on any other
+device — and the kernel's `deferred_probe_timeout` is the only thing that eventually proceeds with the
+probe anyway. Collapsing that timeout makes the boot deterministic; what the driver is waiting *for*
+inside its own probe is still unmeasured, and the honest way to find it is dynamic debug on the driver
+rather than another theory.
+
+Independently of that, the three SMMUv3 units the vendor's IORT declares at `0x13000000`,
+`0x13800000` and `0x14900000` are still unmodelled — the guest claims their windows and the profile
+backs them with an inert region — but they are no longer suspected as the cause of this deferral.
 
 What that did **not** fix: with a disk present, the installer still stops at its `--- Command Line
 Check` stage for the remainder of a 700-second run, so that stage is a separate blocker from the disk.
