@@ -342,8 +342,12 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
         ExitStack() as resources,
         local_path(directory / "serial.log").open("wb") as log,
     ):
+        # `its=on` gives the guest the GIC ITS its own MADT declares at 0x06840000. Without it the
+        # kernel sets up an ITS domain from that record and writes to an address nothing backs, so a
+        # PCIe function that wants MSI-X defers its probe for ever (-EPROBE_DEFER, measured on the
+        # NVMe controllers at 0f:02.0 and 0f:03.0).
         command = [qemu, "-M", "virt,spark-fw-lab=on,spark-rot-error-replies=on,"
-                   "gic-version=3,virtualization=on,secure=on", "-accel", "tcg",
+                   "gic-version=3,virtualization=on,secure=on,its=on", "-accel", "tcg",
                    "-cpu", "max,sve=off,sme=off,pauth=off",
                    "-m", memory or "2G", "-smp", str(smp or 1),
                    "-nodefaults", "-display", "none", "-monitor", "none", "-serial", "stdio",
