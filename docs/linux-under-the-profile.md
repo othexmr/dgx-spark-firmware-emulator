@@ -198,3 +198,26 @@ error, no further output, no setup. Entering at EL2 is what this firmware requir
 A 3 GiB guest is the useful size (the profile aliases PCI space over the first gigabyte, so the guest
 sees two). The harness refuses to start one without roughly 1.25× that in `MemAvailable`; on a host
 under memory pressure the run is skipped rather than run into swap.
+
+## Asking the guest a question
+
+The vendor kernel's `/init` lives in an **embedded** initramfs with no shell on any path an injected
+image can reach, so `init=/bin/sh` is ignored and a diagnostic script has nothing to interpret it. A
+probe therefore has to be a static ELF that talks to the kernel directly: `tests/fixtures/guest_probe.c`
+is one, built `-nostdlib -static` for `aarch64-linux-gnu`, raw syscalls only.
+
+It is injected by appending it as `/init` to the vendor's `INITRD` and rebuilding the ESP: the kernel
+unpacks the external initrd *after* the embedded one, so this file shadows the vendor init. Measured
+consequences, both worth having in mind before using it:
+
+- **it works.** The probe mounted `/proc`, `/sys` and `debugfs`, read `/proc/cmdline`, `/proc/iomem`
+  and `/sys/...`, and printed all of it to the console;
+- **it displaces the init that loads the modules.** With the probe as `/init`, no module is loaded, so
+  the NVMe driver never probes and the `-EPROBE_DEFER` this was written to explain cannot occur. The
+  deferred list is empty for that reason, not because nothing deferred.
+
+What the same boot established about the platform, from `/proc/iomem`: three `arm-smmu-v3` instances
+claim `0x13000000`, `0x13800000` and `0x14900000` — the addresses the vendor's IORT declares — while
+the profile backs none of them. The SMMU is therefore a real device to the guest and an inert window
+to the model, which is the largest remaining difference between this profile and the machine it
+models.
