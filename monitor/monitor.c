@@ -106,6 +106,9 @@ struct context {
 };
 static struct context secure_context, nonsecure_context;
 static int ns_started, ns_pending;
+/* Which direct request is waiting for the secure world, so its answer can be logged as a pair
+ * with the question it answers. Only meaningful under MONITOR_TRACE. */
+static u64 pending_direct;
 static u64 ns_rx, ns_tx, sp_rx, sp_tx;
 static u64 *sp_hvc_frame;
 static u64 shared_address, shared_size;
@@ -598,6 +601,21 @@ void handle(u64 *r, u64 level) {
             WRITE(SCR_EL3, SCR | 1);
             restore(&nonsecure_context, r);
             ns_pending = 0;
+#ifdef MONITOR_TRACE
+            if (pending_direct) {
+                console_puts("\nDIRECT_RESP fid=");
+                hex(pending_direct);
+                console_puts(" a0=");
+                hex(r[0]);
+                console_puts(" a1=");
+                hex(r[1]);
+                console_puts(" a2=");
+                hex(r[2]);
+                console_puts(" a3=");
+                hex(r[3]);
+                pending_direct = 0;
+            }
+#endif
         } else {
             console_puts("MON: bad secure yield\n");
             for (;;) {
@@ -879,6 +897,7 @@ void handle(u64 *r, u64 level) {
         }
         save(&nonsecure_context, r);
         ns_pending = 1;
+        pending_direct = r[1];
         copy(sp_hvc_frame, r, 8);
         WRITE(SCR_EL3, SCR);
         restore(&secure_context, r);

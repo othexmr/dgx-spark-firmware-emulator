@@ -265,3 +265,20 @@ backs them with an inert region — but they are no longer suspected as the caus
 
 What that did **not** fix: with a disk present, the installer still stops at its `--- Command Line
 Check` stage for the remainder of a 700-second run, so that stage is a separate blocker from the disk.
+
+## The FF-A direct-request loop is the secure world's, not the kernel's
+
+The loader passes `efi=noruntime` because an earlier note said the kernel's `efisubsys_init` spins in an
+FF-A direct-request loop. With the monitor's relay now logging both sides of every direct request, and
+the flag removed for one run, that premise does not hold:
+
+- `efisubsys_init` **returns 0 in one millisecond** — no spin;
+- the boot still reaches userspace (`--- FastOS Version`), so the flag is not what saves it;
+- the requests that do loop carry `x1 = 3` — no modelled endpoint — and come from the **secure world**
+  (`SMC … ns=0x0`, `elr=0x93a7e168`), in 640 identical pairs of which 466 are answered;
+- EFI variables still do not work either way: the initramfs reports
+  `mount: mounting none on /sys/firmware/efi/efivars failed: Operation not supported`.
+
+So the flag is a no-op with a stale justification rather than a workaround. What actually gates EFI
+variables is the firmware's runtime variable service, which is reached through an endpoint this
+monitor does not serve — the same gap, now named precisely instead of hidden behind a flag.
