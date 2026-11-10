@@ -441,6 +441,11 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                                     (handoff, 0x80010000, False), (state, 0xa0000000, False)):
             command += ["-device", f"loader,file={image},addr={address:#x},force-raw=on" +
                         (",cpu-num=0" if cpu else "")]
+        if monitor and (smp or 1) > 1:
+            # The secondary has to enter the monitor to park; without this it starts at QEMU's reset
+            # vector, which holds nothing, and executes zeros. Parking is what gives CPU_ON something
+            # to release later.
+            command += ["-device", f"loader,file={monitor},addr=0x80020000,force-raw=on,cpu-num=1"]
         record["command"] = command
         try:
             process = resources.enter_context(subprocess.Popen(
