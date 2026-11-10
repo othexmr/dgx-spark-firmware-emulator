@@ -246,9 +246,18 @@ Measured with the injected probe and the modules loaded by hand from the archive
 So the `-517` is the driver's own probe, not a missing device behind it: the PCI function's sysfs
 directory carries **no `supplier:*` links**, so it is not waiting on the SMMU — or on any other
 device — and the kernel's `deferred_probe_timeout` is the only thing that eventually proceeds with the
-probe anyway. Collapsing that timeout makes the boot deterministic; what the driver is waiting *for*
-inside its own probe is still unmeasured, and the honest way to find it is dynamic debug on the driver
-rather than another theory.
+probe anyway. Collapsing that timeout makes the boot deterministic.
+
+Instrumentation is exhausted for this question, and that is worth writing down so nobody repeats it:
+
+- `dyndbg="file drivers/nvme/host/* +p"` produces no output at all, and a global `dyndbg=+p` run has
+  nothing between `really_probe: probing driver nvme` and `Added to deferred list` — the returning
+  path carries no `dev_dbg`;
+- the vendor kernel ships headers, not sources, so the call cannot be read out of a tree.
+
+What is left is to bound the cost rather than to explain it: one second of delay, one documented flag,
+and the boot is deterministic. A future attempt should start from the vendor's source for this kernel
+version, not from another hypothesis.
 
 Independently of that, the three SMMUv3 units the vendor's IORT declares at `0x13000000`,
 `0x13800000` and `0x14900000` are still unmodelled — the guest claims their windows and the profile
