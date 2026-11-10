@@ -63,5 +63,10 @@
     "whether modelling these three instances changes the NVMe probe's -EPROBE_DEFER (measured: the deferred device carries no supplier link, so the SMMU is not its dependency)",
     "what stream IDs each instance owns — the IORT has no ID mappings for PCI, so a faithful model cannot yet say which device goes through which SMMU",
     "whether the guest would attach PCI devices to them (no ID mappings and no root-complex node means the answer is probably no, which is why modelling them is safe rather than transformative)"
-  ]
+  ],
+  "how_to_make_the_change": {
+    "warning": "do not hand-edit hunks in qemu/patches/0001-spark-fw-address-profile.patch: a single blank context line that loses its leading space, or an added block spliced into an existing hunk, makes git apply reject the file while patch(1) still accepts it — the builder uses git apply, so the failure surfaces as 'corrupt patch' at build time",
+    "method": "apply the patch by building once, edit build/qemu-src/hw/arm/virt.c, then regenerate the whole patch as a diff against the pristine tree and re-apply it from scratch to confirm git apply --check passes before committing",
+    "verified_by": "git apply --check in a throwaway git clone of the pristine v11.1.2 tree"
+  }
 }
