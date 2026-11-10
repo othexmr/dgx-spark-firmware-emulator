@@ -313,8 +313,13 @@ efi_status _start(efi_handle image, efi_system_table *table)
      * efi=noruntime: this profile does not implement the firmware's runtime variable service (it
      * answers FF-A direct requests to endpoint 0x8004 with "unsupported"), so the kernel's
      * efivar_init spins; without runtime services the boot proceeds. */
+    /* deferred_probe_timeout=1: the vendor's IORT declares three SMMUv3 units this profile does not
+     * model, so every PCIe function gets a device link to an IOMMU that never becomes ready. The
+     * kernel waits its default ten seconds, then "ignores the dependency" and binds anyway — measured,
+     * and with the default the installer looks for a disk before that happens and finds none. One
+     * second collapses the wait; when the SMMU is modelled this can go. */
     char16 *options = ascii_to_utf16("console=ttyS0,115200 earlycon=uart8250,mmio32,0x16a00000 acpi=force "
-                                     "keep_bootcon nokaslr initcall_debug "
+                                     "keep_bootcon nokaslr initcall_debug deferred_probe_timeout=1 "
                                      "efi=noruntime ignore_loglevel initrd=\\INITRD");
     /* This firmware refuses LoadImage with a NULL parent image handle, and refuses a file-system
      * handle as parent; an image handle is required, and that is the one thing about the call a

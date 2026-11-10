@@ -231,3 +231,22 @@ claim `0x13000000`, `0x13800000` and `0x14900000` — the addresses the vendor's
 the profile backs none of them. The SMMU is therefore a real device to the guest and an inert window
 to the model, which is the largest remaining difference between this profile and the machine it
 models.
+
+## Why the NVMe driver defers, and what that costs
+
+Measured with the injected probe and the modules loaded by hand from the archive:
+
+- the device is put on the deferred list **with no supplier bound**, and nothing on the list explains
+  it;
+- ten seconds later the kernel prints `nvme 000f:00:02.0: deferred probe timeout, ignoring dependency`
+  and the probe returns **0** — the driver binds and the namespaces appear;
+- with `deferred_probe_timeout=1` on the command line, the vendor flow binds **both** controllers at
+  9 s (`nvme nvme0: pci function 000f:00:02.0`, `nvme nvme1: …`) and `nvme0n1` appears.
+
+So the `-517` is an unresolved device link, not a broken device: the vendor's IORT declares three
+SMMUv3 units at `0x13000000`, `0x13800000` and `0x14900000`, the profile backs none of them, and the
+kernel's own timeout is what saves the boot. Collapsing the timeout is a workaround with a date on it;
+modelling the SMMU is the fix.
+
+What that did **not** fix: with a disk present, the installer still stops at its `--- Command Line
+Check` stage for the remainder of a 700-second run, so that stage is a separate blocker from the disk.
