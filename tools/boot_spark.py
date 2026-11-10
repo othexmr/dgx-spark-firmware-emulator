@@ -217,7 +217,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
     monitor = build_monitor(policy, write_us, erase_us, nor_size, nor_offset, trace,
                             accept_mmap_notify, gwdt_timeout_ms, ram_top=ram_top,
                             rtc_base=epoch_seconds(rtc_base), code_offset=code_offset,
-                            program_model=program_model,
+                            program_model=program_model, cpus=smp or 1,
                             code_size=(prepared_directory(firmware_version) / "uefi.fd").stat().st_size
                             if code_offset is not None else None)
     prepared_firmware = prepared_directory(firmware_version) / "uefi.fd"

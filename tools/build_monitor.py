@@ -52,7 +52,7 @@ def latency_flags(write_us, erase_us=None):
 def build_monitor(policy="armed", write_us=0, erase_us=None, nor_size=0x2000000,
                   nor_offset=0x3000000, trace=False, accept_mmap_notify=False,
                   gwdt_timeout_ms=None, ram_top=None, rtc_base=None, code_offset=None,
-                  code_size=None, program_model="page"):
+                  code_size=None, program_model="page", cpus=1):
     if policy not in POLICIES:
         raise ValueError(f"unknown flash policy: {policy}")
     if nor_size not in NOR_SIZES:
@@ -60,7 +60,14 @@ def build_monitor(policy="armed", write_us=0, erase_us=None, nor_size=0x2000000,
             "nor_size must be one of "
             + ", ".join(f"{value:#x}" for value in NOR_SIZES))
     flags = POLICIES[policy] + latency_flags(write_us, erase_us)
+    if cpus not in (1, 2):
+        raise ValueError("the spark-fw-lab machine models one or two CPUs")
+    flags = flags + [f"-DSPARK_CPU_COUNT={cpus}"]
     suffix = policy
+    if cpus != 1:
+        # The cache key has to carry it: a one-CPU and a two-CPU monitor differ only in this flag, so
+        # without it the second build silently reuses the first one's binary.
+        suffix = suffix + f"-cpu{cpus}"
     if write_us or erase_us:
         suffix = "{0}-{1}us-{2}erus".format(policy, write_us, erase_us)
     if nor_size != 0x2000000:

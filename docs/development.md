@@ -293,7 +293,8 @@ the pass condition is shell entry, not a clean platform initialization report.
 ## Two CPUs, and what the second one does
 
 The profile models one or two CPUs. With `--smp 2` the machine starts the primary and holds the
-second parked: the monitor implements no PSCI, so nothing services `CPU_ON`. That is measured, not
+second parked: the monitor answers `AFFINITY_INFO` and refuses `CPU_ON` with `NOT_SUPPORTED` because no
+release path exists, so nothing services it. That is measured, not
 assumed — a run tracing the firmware entry with `--smp 2` records `trace_per_cpu: {"cpu0": 1}` and
 `secondary_cpus: "parked until started"`, so a receipt cannot imply parallel execution that did not
 happen.

@@ -462,6 +462,23 @@ static int rtc_service(u64 *r) {
     r[4] = data;
     return 1;
 }
+/* PSCI. Two answers have to be truthful before a caller will believe anything else: how many CPUs
+ * this model has, and which of them are running. SPARK_CPU_COUNT comes from the profile's -smp, so a
+ * one-CPU build reports one CPU rather than guessing.
+ *
+ * CPU_ON and CPU_OFF answer NOT_SUPPORTED. The second CPU is parked at the monitor's entry and no
+ * release path exists yet, so answering SUCCESS would tell a caller to wait for a CPU that will never
+ * start — a caller that never times out is worse than one that is told the truth. PSCI_FEATURES
+ * advertises only what is really answered, for the same reason.
+ */
+#ifndef SPARK_CPU_COUNT
+#define SPARK_CPU_COUNT 1
+#endif
+#define PSCI_AFFINITY_ON   0
+#define PSCI_AFFINITY_OFF  1
+#define PSCI_INVALID_PARAMETERS 0xfffffffeUL
+#define PSCI_NOT_SUPPORTED 0xffffffffUL
+
 /* SMCCC TRNG 1.0 backed by QEMU RNDR and its host CSPRNG. */
 static int trng_supported(u32 fid) {
     return fid == 0x84000050 || fid == 0x84000051 || fid == 0x84000052 ||
@@ -608,7 +625,10 @@ void handle(u64 *r, u64 level) {
         return;
     }
     if (fid == 0x8400000a) {
-        r[0] = -1UL;
+        /* Bit 0: a 32-bit variant is answered. Bit 1: a 64-bit variant is answered. Only the calls
+         * this monitor really answers are advertised. */
+        u32 feature = (u32)r[1];
+        r[0] = (feature == 0x84000004 || feature == 0xc4000004) ? 3 : -1UL;
         return;
     }
     if (fid == 0x84000069) {
@@ -875,6 +895,25 @@ void handle(u64 *r, u64 level) {
         return;
     }
 #endif
+    if (fid == 0xc4000004 || fid == 0x84000004) {
+        /* AFFINITY_INFO: level 0 asks about one CPU, level 1 about the cluster. */
+        u64 target = r[1], level = r[2];
+        if (level > 1 || (level == 1 && (target >> 8)))
+            r[0] = PSCI_INVALID_PARAMETERS;
+        else if (level == 1)
+            r[0] = PSCI_AFFINITY_ON;
+        else if ((target & ~0xffUL) || (target & 0xff) >= SPARK_CPU_COUNT)
+            r[0] = PSCI_INVALID_PARAMETERS;
+        else
+            r[0] = (READ(MPIDR_EL1) & 0xff) == (target & 0xff) ? PSCI_AFFINITY_ON
+                                                               : PSCI_AFFINITY_OFF;
+        return;
+    }
+    if (fid == 0xc4000003 || fid == 0x84000003 || fid == 0xc4000002 || fid == 0x84000002) {
+        /* CPU_ON / CPU_OFF: no release path exists, so this is the honest answer. */
+        r[0] = PSCI_NOT_SUPPORTED;
+        return;
+    }
     if ((fid & 0xffff) >= 0x60 && (fid & 0xffff) <= 0x8f)
         unsupported(r);
     else
