@@ -214,7 +214,17 @@ consequences, both worth having in mind before using it:
   and `/sys/...`, and printed all of it to the console;
 - **it displaces the init that loads the modules.** With the probe as `/init`, no module is loaded, so
   the NVMe driver never probes and the `-EPROBE_DEFER` this was written to explain cannot occur. The
-  deferred list is empty for that reason, not because nothing deferred.
+  deferred list is empty for that reason, not because nothing deferred;
+- **there is nothing to hand control back to.** Measured in that boot: `/bin`, `/sbin` and `/usr/bin`
+  do not exist (ENOENT), and `/` itself refuses `O_DIRECTORY` with EINVAL, so this rootfs has no shell
+  on any path. The vendor "init" is a static binary that `/init` names, and an injected `/init`
+  necessarily replaces it — there is no second init to `exec`.
+
+So the `-517` cannot be reproduced by injecting an init unless that init also performs the vendor's
+module loading. The modules are `.ko.zst` inside the same INITRD, which a freestanding probe cannot
+decompress; the practical route is to decompress them on the host, place the `.ko` files in the
+injected archive, and `finit_module` them from the probe — or to model the SMMU first, which is
+independently the largest known difference between this profile and the machine.
 
 What the same boot established about the platform, from `/proc/iomem`: three `arm-smmu-v3` instances
 claim `0x13000000`, `0x13800000` and `0x14900000` — the addresses the vendor's IORT declares — while
