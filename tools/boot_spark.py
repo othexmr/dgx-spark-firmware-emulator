@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.build_monitor import NOR_SIZES, build_monitor
 from tools.download_firmware import require_ignored_untracked
+from tools.console import keys_for
 from tools.dxe_protocols import inspect_protocols
 from tools.handoff import boot_arguments
 from tools.prepare_mm import MM_SHA256, prepare_mm
@@ -194,7 +195,8 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
         allow_marker_only=False, nor_offset=0x3000000, code_offset=None, trace=False,
         accept_mmap_notify=False, gwdt_timeout_ms=None, stop_after_boots=None,
         program_model=None, code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
-        extended_ram=False, nvme_images=None):
+        extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
+        console_after=0.0, console_delay=0.03):
     qemu = shutil.which(qemu)
     if qemu is None:
         raise ValueError("build the Spark QEMU profile first: python3 tools/build_qemu.py")
@@ -272,7 +274,9 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
                           accept_mmap_notify=accept_mmap_notify, gwdt_timeout_ms=gwdt_timeout_ms,
                           nor_offset=nor_offset, code_offset=code_offset,
                           stop_after_boots=stop_after_boots, program_model=program_model,
-                          code_offset_source=code_offset_source,
+                          code_offset_source=code_offset_source, qmp_path=qmp_path,
+                          console_script=console_script, console_after=console_after,
+                          console_delay=console_delay,
                           trace_pc=trace_pc, trace_limit=trace_limit, trace_sample=trace_sample, extended_ram=extended_ram,
                           nvme_images=nvme_images,
                           allow_marker_only=allow_marker_only, firmware_path=firmware_path)
@@ -286,7 +290,8 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                nor_offset=0x3000000, code_offset=None, stop_after_boots=None,
                allow_marker_only=False, firmware_path=None, program_model=None,
                code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
-               extended_ram=False, nvme_images=None):
+               extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
+               console_after=0.0, console_delay=0.03):
     firmware_directory = prepared_directory(firmware_version)
     if firmware_path is None:
         firmware_path = firmware_directory / "uefi.fd"
@@ -351,7 +356,8 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                    "-cpu", "max,sve=off,sme=off,pauth=off",
                    "-m", memory or "2G", "-smp", str(smp or 1),
                    "-nodefaults", "-display", "none", "-monitor", "none", "-serial", "stdio",
-                   "-qmp", f"unix:{temporary}/qmp,server=on,wait=off",
+                   "-qmp", (f"unix:{qmp_path},server=on,wait=off" if qmp_path
+                            else f"unix:{temporary}/qmp,server=on,wait=off"),
                    # cpu_reset is what makes a reboot explainable: the watchdog, which is
                    # what resets the board-faithful image, logs its expiry there.
                    "-d", "guest_errors,unimp,cpu_reset", "-D",
@@ -440,11 +446,17 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
             process = resources.enter_context(subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, bufsize=0))
-            qmp = resources.enter_context(Qmp(connect_unix(Path(temporary) / "qmp", process)))
+            qmp = resources.enter_context(Qmp(connect_unix(
+                Path(qmp_path) if qmp_path else Path(temporary) / "qmp", process)))
             selector = resources.enter_context(selectors.DefaultSelector())
             selector.register(process.stdout, selectors.EVENT_READ, "uart")
             if interactive:
                 selector.register(sys.stdin, selectors.EVENT_READ, "keyboard")
+            # A console script is typed once, `console_after` seconds in: a guest with no shell
+            # prompt to wait for (a menuless installer, or init=/bin/sh) needs a deadline, not a
+            # guess about when it is ready.
+            script = (list(console_script.read_text().splitlines()) if console_script else [])
+            script_due = time.monotonic() + console_after if script else None
             deadline = time.monotonic() + timeout
             escape_sent = False
             navigate_at = stop_at = None
@@ -484,6 +496,17 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                         process.stdin.write(b"\x1b[C")
                         navigation_offset = len(capture)
                         navigate_at = None
+                    if script_due is not None and now >= script_due:
+                        # Type the whole script, one key at a time, the way a keyboard would. The
+                        # guest's serial FIFO is small and TCG is slow, so each key waits.
+                        for line in script:
+                            for character in line + "\n":
+                                qmp.key(keys_for(character))
+                                time.sleep(console_delay)
+                            time.sleep(console_delay * 10)
+                        record["console_script"] = {"lines": len(script),
+                                                   "typed_at": round(now, 3)}
+                        script_due = None
                     for key, _ in selector.select(.05):
                         if key.data == "keyboard":
                             data = os.read(sys.stdin.fileno(), 4096)
@@ -994,6 +1017,17 @@ def main():
     parser.add_argument("--pxe-image", type=Path,
                         help="serve this EFI application over the PXE path instead of the "
                              "built-in probe; requires --pxe-test and --pxe-marker")
+    parser.add_argument("--console-script", type=Path, metavar="FILE",
+                        help="type this file's lines into the guest console once --console-after "
+                             "seconds have passed, one line per Enter; a menuless installer or a "
+                             "shell still has to be told what to do")
+    parser.add_argument("--console-after", type=float, default=0.0, metavar="SECONDS",
+                        help="when to start typing the console script (default: as soon as the "
+                             "guest starts)")
+    parser.add_argument("--qmp-alive", type=Path, metavar="PATH",
+                        help="put the QMP socket at PATH and leave it there, so another process can "
+                             "type into the guest console while the run is going; the run still ends "
+                             "on its own timeout")
     parser.add_argument("--gdb", type=int, metavar="PORT",
                         help="diagnostic: hold the CPU at reset and expose a GDB stub on PORT")
     parser.add_argument("--board", action="store_true",
@@ -1147,7 +1181,8 @@ def main():
                         program_model=args.program_model, trace_pc=args.trace_pc,
                         trace_limit=args.trace_limit, trace_sample=args.trace_sample,
                         extended_ram=args.extended_ram,
-                        nvme_images=args.nvme_image,
+                        nvme_images=args.nvme_image, qmp_path=args.qmp_alive,
+                        console_script=args.console_script, console_after=args.console_after,
                         accept_mmap_notify=args.accept_mmap_notify,
                         gwdt_timeout_ms=args.gwdt_timeout_ms,
                         stop_after_boots=args.stop_after_boots)
