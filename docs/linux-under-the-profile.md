@@ -445,3 +445,31 @@ per-sample output slows the boot enough that a 900-second run never reaches the 
 sampled addresses from that attempt were all firmware, `0xbfab1254` alone accounting for 36 094 of
 81 496.
 
+## The kernel stall is a loop in `update_event_printk`, and the sampler had to be fixed to see it
+
+Two instrument defects had hidden this. The sampler's `limit` counted samples from reset, so the firmware
+phase (about 2.1e10 blocks, measured: 105 603 samples at a 200 000 interval) exhausted a 4 000-sample
+limit and every kernel sample was censored — the counts said "no hot loop" when the log had stopped
+looking. With the limit raised above the firmware phase, the same sampler shows the loop plainly:
+
+```
+     24 pc=0xffff8000803518b8   update_event_printk+0x50
+     22 pc=0xffff8000803518c0   update_event_printk+0x58
+     20 pc=0xffff8000803518b0   update_event_printk+0x48
+     18 pc=0xffff800080351930   update_event_printk+0xc8
+     12 pc=0xffff8000803518d8   update_event_printk+0x70
+```
+
+Resolved against `System.map-7.0.0-1019-nvidia`, extracted from the installed disk itself: 96 of the
+kernel samples sit inside 128 bytes of one function, which is a loop, not a scan over events.
+
+That also corrects the earlier reading of the same run: five scattered single samples looked like an idle
+wait, but they were simply all the log contained once the limit was reached. The guest holds the BQL and
+QMP cannot answer during the loop, which is consistent with executing rather than waiting.
+
+`--trace-start N` was added so a sampler can skip a firmware phase whose block count a previous run's
+summary reports, rather than depending on a limit large enough for both phases.
+
+What the loop means is not yet established: `update_event_printk` walks an event's print format, so the
+next step is the loop condition inside that function, read from the installed kernel image.
+
