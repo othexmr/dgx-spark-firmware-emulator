@@ -196,7 +196,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
         accept_mmap_notify=False, gwdt_timeout_ms=None, stop_after_boots=None,
         program_model=None, code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
         extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-        console_after=0.0, console_delay=0.03):
+        console_after=0.0, console_delay=0.03, usb_image=None):
     qemu = shutil.which(qemu)
     if qemu is None:
         raise ValueError("build the Spark QEMU profile first: python3 tools/build_qemu.py")
@@ -276,7 +276,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
                           stop_after_boots=stop_after_boots, program_model=program_model,
                           code_offset_source=code_offset_source, qmp_path=qmp_path,
                           console_script=console_script, console_after=console_after,
-                          console_delay=console_delay,
+                          console_delay=console_delay, usb_image=usb_image,
                           trace_pc=trace_pc, trace_limit=trace_limit, trace_sample=trace_sample, extended_ram=extended_ram,
                           nvme_images=nvme_images,
                           allow_marker_only=allow_marker_only, firmware_path=firmware_path)
@@ -291,7 +291,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                allow_marker_only=False, firmware_path=None, program_model=None,
                code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
                extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-               console_after=0.0, console_delay=0.03):
+               console_after=0.0, console_delay=0.03, usb_image=None):
     firmware_directory = prepared_directory(firmware_version)
     if firmware_path is None:
         firmware_path = firmware_directory / "uefi.fd"
@@ -446,6 +446,12 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
             # vector, which holds nothing, and executes zeros. Parking is what gives CPU_ON something
             # to release later.
             command += ["-device", f"loader,file={monitor},addr=0x80020000,force-raw=on,cpu-num=1"]
+        if usb_image is not None:
+            usb_image = local_path(usb_image)
+            command += ["-drive", f"if=none,id=usb0,file={usb_image},format=raw,snapshot=on",
+                        "-device", "usb-storage,drive=usb0,serial=SPARKKEY"]
+            record["usb_image"] = {"path": str(usb_image),
+                                   "sha256": hashlib.sha256(usb_image.read_bytes()).hexdigest()}
         record["command"] = command
         try:
             process = resources.enter_context(subprocess.Popen(
@@ -1027,6 +1033,9 @@ def main():
     parser.add_argument("--console-after", type=float, default=0.0, metavar="SECONDS",
                         help="when to start typing the console script (default: as soon as the "
                              "guest starts)")
+    parser.add_argument("--usb-image", type=Path, metavar="PATH",
+                        help="attach this image as a USB key: the recovery media is a USB key on "
+                             "hardware and the installer looks for /dev/sd* with fastos-release.txt")
     parser.add_argument("--qmp-alive", type=Path, metavar="PATH",
                         help="put the QMP socket at PATH and leave it there, so another process can "
                              "type into the guest console while the run is going; the run still ends "
@@ -1186,6 +1195,7 @@ def main():
                         extended_ram=args.extended_ram,
                         nvme_images=args.nvme_image, qmp_path=args.qmp_alive,
                         console_script=args.console_script, console_after=args.console_after,
+                        usb_image=args.usb_image,
                         accept_mmap_notify=args.accept_mmap_notify,
                         gwdt_timeout_ms=args.gwdt_timeout_ms,
                         stop_after_boots=args.stop_after_boots)
