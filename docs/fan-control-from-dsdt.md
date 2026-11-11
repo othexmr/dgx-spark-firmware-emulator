@@ -132,6 +132,15 @@ be driven from a host test:
   measured on the unit at host `0x06000600`, EC `0x119000`. Both receive the same value, which pins
   the fans rather than setting a second one;
 - **read**: `x4 = 0x0C | (0x06000704 << 8) | (2 << 40)` returns the rpm in `x4`;
+- **a read answers zero once before it answers**: measured on a unit (2026-11-11), the *first* read
+  after a gap returns `0` with the success completion code, and the *second* returns the rpm — for
+  either status id. Two consecutive reads of `0x06000706` gave `0x0` then `0x10e0` (4320 rpm), with
+  the cooling device reading level 99 in the same instant. This is what made an earlier version of
+  `kernel/spark_fan.c` conclude that "`0x06000704` answers 0", and it is why the module now issues each
+  status read twice and keeps the second answer. It does **not** show that the two ids are one fan:
+  both fans are driven to the same rpm by `_FSL`, so equal readings are what two identically-driven
+  fans look like;
+
 - the reply is `x0 = 0xC400008E`, the endpoint echoed in `x1`, and the register file cleared to
   `x17` — the same shape the RTC service on the same function id uses;
 - `fan_rpm_for_level()` reproduces `WFCF`'s arithmetic exactly: `975 + (4350 - 975) * level / 100`.
@@ -290,3 +299,40 @@ has loaded there at least once, but a refusal at load time is still possible and
 **The pin is the part to think about, not the read.** With `allow_pin=1`, writing a level sets both clamp
 registers and nothing in ACPI restores them: a reboot is the only measured way back, and the fans stay
 capped at the level's rpm (4350 at level 100, against fan 0's 9000) even under load.
+
+## The hwmon interface, and why `pwm1` is not the tachometer
+
+`kernel/spark_fan.c` registers a thermal cooling device *and* an hwmon device (`spark_fan`):
+
+| attribute | meaning |
+| --- | --- |
+| `fan1_input`, `fan2_input` | rpm from the two status ids, each read twice because of the warm-up above |
+| `pwm1` | the level that was **asked for**, scaled 0..255 (level 0..100) |
+| `pwm1_enable` | `2` = firmware control (the default, and what a module unload leaves behind), `1` = manual |
+
+A write to `pwm1` while `pwm1_enable` is `2` is refused with `EPERM` rather than silently ignored, and
+`pwm1` reports the setpoint rather than the tachometer reading, because the fans ramp: after `echo 20`
+the measured level was still 87 four seconds later. A supervisor that compared its write against an
+immediate readback would conclude every successful write had failed.
+
+## What the level actually is, measured on a unit (2026-11-11)
+
+Two corrections that change how the interface should be used, both from one supervised run on an
+ACUM027 unit:
+
+- **the `_FSL` level is a floor, not a fan setting.** The scale maps level 0..100 to `975 + 3375·level/100`
+  rpm — 975 to **4350 rpm** — and the EC is free to run the fans above whatever floor it is given. Two
+  different levels are therefore often the same setting to the EC, which is why an A/B on the level
+  measured nothing at all. Anything that must be audible has to ask for an rpm.
+- **the transport carries the rpm itself.** The write commands `0x06000790..0x06000793` take two
+  little-endian bytes of rpm, so a floor above the `_FSL` scale can be requested directly: `13500` was
+  written and the service then reported **8820/12420 rpm**, audibly louder than the other units beside it.
+
+Under the same 8-worker load for the same duration, the hottest zone peaked at **61 °C** with firmware
+control, **60 °C** at a 4350 rpm floor and **55 °C** at 12500 — one run per arm, so an observation and not
+a benchmark. The cooling-rate arms of the same script measured nothing, because the machine never rose
+above the cool-to target in two of the three arms.
+
+And the floor does not come back: unloading the module or writing `pwm1_enable=2` leaves the EC's clamps
+as last written. **A reboot is the only restore**, which is why the module refuses to write without
+`allow_pin=1`.

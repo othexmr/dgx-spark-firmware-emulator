@@ -71,5 +71,25 @@
       "control (the last level written, from AML state)",
       "speed in rpm (from the SMC reply)"
     ]
+  },
+  "write_path_measured": {
+    "date": "2026-11-11",
+    "unit": "one ACUM027 unit, Secure Boot off, module built with the unit's own kbuild",
+    "level_scale_is_a_floor": "the _FSL scale maps level 0..100 to 975 + 3375*level/100 rpm, i.e. 975 to 4350 rpm. That is a floor, not a fan setting: level 100 asks for 4350 rpm and the EC is free to run above it. Two different levels are therefore often the same setting to the EC, which is why an A/B on the level measured nothing",
+    "transport_takes_rpm": "the write commands 0x06000790..0x06000793 carry the rpm itself as two little-endian bytes, so a floor above the _FSL scale can be asked for directly: rpm_floor=13500 was written and the service then reported 8820/12420 rpm. The quiet third-party project on the same hardware reports the fans reaching 9000/13500 rpm, which is consistent",
+    "heard": "with the 13500 floor the machine is audibly louder than the other units on the same desk — the corroboration the tachometer cannot give, since both come from the same service",
+    "thermal_observation": {
+      "what": "the same 8-worker CPU load was run for the same duration under three settings and the hottest thermal zone sampled once a second",
+      "peaks_C": {
+        "firmware control": 61,
+        "floor 4350 rpm": 60,
+        "floor 12500 rpm": 55
+      },
+      "reading": "the high floor held the machine 6 C cooler under the same load",
+      "not_a_benchmark": "one run per arm, no repetition, no control for ambient or for the EC's own policy; this is an observation, not a controlled performance benchmark. The cooling-rate arms of the same script produced no measurement because the machine never rose above the cool-to target in two of the three arms",
+      "not_a_benchmark_precedent": "the third-party project states the same limit about its own thermal runs, and this record follows it"
+    },
+    "does_not_revert": "nothing in this interface releases the EC's clamps: unloading the module and writing pwm1_enable=2 both leave the last floor in place. A reboot is the only restore, which is why the module refuses to write without allow_pin=1",
+    "read_warmup": "a status read answers 0 on the first call after a gap and the rpm on the second; both status ids behave the same way"
   }
 }
