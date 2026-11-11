@@ -406,20 +406,18 @@ pci 000f:00:02.0: BAR 0 [mem 0x24000000-0x24003fff 64bit]
 acpi PNP0A08:0b: ECAM at [mem 0x29000000-0x291fffff] for [bus 00-01]
 ```
 
-It then reaches `scmi_core: SCMI protocol bus registered` at kernel time 2.54 s and goes quiet — the same
-place the recovery boot reached before it eventually continued, at kernel time ~25 s, to
-`Run /init as init process`. That gap is slow, not stuck (the earlier trace showed the vCPU accumulating
-time in a code loop), which is why the earlier successes used a 3 GiB guest and up to an hour of wall
-time. A 2400-second budget is too short for this machine; the documented allowance is an hour.
+Before the context-switch fix below, it reached `scmi_core: SCMI protocol bus registered` and stopped.
+The recovery boot's later `Run /init as init process` did **not** establish that the installed boot was
+merely slow. The earlier claim that another hour would resolve this gap was wrong: the installed
+kernel triggers a secure-world execute-permission fault, followed by recursive vector-fetch faults.
 
 The original ESP stanza is preserved as `EFI/ubuntu/grub.cfg.orig` on the disk, so the verbose line is a
 diagnostic that can be reverted from the same shell that wrote it.
 
-## The stall is a return from an FF-A direct request, and the register file says so
+## The FF-A register file: an initial return-address hypothesis, since disproved
 
-`--qmp-alive` leaves a QMP socket behind, and `human-monitor-command` answers on it — but not promptly:
-69 seconds measured, because while the guest loops inside a translation block it holds the BQL. A short
-timeout reports a hang that is not one. The dump at the stall, once it arrives:
+QMP took 69 seconds to answer in one measurement; that delay alone does not identify a guest loop.
+The original dump at the stall was:
 
 ```
 PC=0x0000000000000200  X00=0x00000000c400006f  X01=0x0000000000008004
@@ -427,30 +425,24 @@ X29=0x0000000093a7bce0 X30=0x0000000093a779d8  SP=0x0000000093a7bce0
 PSTATE=0x00000000000023c5 ---- EL1h
 ```
 
-Two things are in that line. `x0`/`x1` are the FF-A direct request to STMM — `0xc400006f` with
-endpoint `0x8004`, the pair this monitor relays. And `PC = 0x200` is offset `0x200` of a vector table
-whose base is zero: the synchronous-exception slot for the current EL with SPx, at the address the CPU
-takes when `VBAR_EL1` is unset. A boot that has printed `scmi_core` has long since set `VBAR_EL1`, so
-either the guest was returned to a context whose vector base is zero, or the exception is being taken
-before the kernel's vectors exist.
+`x0`/`x1` identify the FF-A request to STMM, and `PC=0x200` identifies the synchronous current-EL/SPx
+vector with a zero base. They do **not** establish that the context is Linux, or that the monitor
+returned to the wrong address. The decisive exception trace below shows a correct return into STMM
+whose instruction fetch is denied. The complete later register dump explicitly says `S EL1h`.
 
-That makes this a return-address problem at the SMC, not an SCMI handshake: the guest issues the direct
-request to `0x8004`, and the value it resumes at is not where it left. The monitor's relay is the code
-that decides that, so the next probes are its own: what `ELR_EL3` holds across the handover, whether
-`ns_pending` was already set when the request arrived (the monitor answers `unsupported` in that case),
-and whether the secure context it restores is the one that was saved.
+Likewise, a zero `VBAR_EL1` can belong to an EL2 firmware caller, or to this STMM partition, which
+has no EL1 vector base at its first yield. AArch64 `VBAR_EL1` is not security-banked
+in this QEMU; its per-world save/restore is necessary, not evidence of corruption by itself.
 
-A first pass also ruled out the cheap explanations: the trace plugin is not usable for this (its
-per-sample output slows the boot enough that a 900-second run never reaches the kernel), and the
-sampled addresses from that attempt were all firmware, `0xbfab1254` alone accounting for 36 094 of
-81 496.
+An early sampler attempt also exhausted its output before the kernel: its addresses were all firmware,
+`0xbfab1254` alone accounting for 36 094 of 81 496 samples. That did not make the plugin unusable;
+the later start/limit corrections below made it useful.
 
-## The kernel stall is a loop in `update_event_printk`, and the sampler had to be fixed to see it
+## A rejected loop diagnosis, and the sampler fixes that exposed its limit
 
-Two instrument defects had hidden this. The sampler's `limit` counted samples from reset, so the firmware
-phase (about 2.1e10 blocks, measured: 105 603 samples at a 200 000 interval) exhausted a 4 000-sample
-limit and every kernel sample was censored — the counts said "no hot loop" when the log had stopped
-looking. With the limit raised above the firmware phase, the same sampler shows the loop plainly:
+The sampler's `limit` counted samples from reset, so the firmware phase (about 2.1e10 blocks, measured:
+105 603 samples at a 200 000 interval) exhausted a 4 000-sample limit and censored every kernel sample.
+With the limit raised, the same sampler captured this concentration:
 
 ```
      24 pc=0xffff8000803518b8   update_event_printk+0x50
@@ -460,18 +452,15 @@ looking. With the limit raised above the firmware phase, the same sampler shows 
      12 pc=0xffff8000803518d8   update_event_printk+0x70
 ```
 
-Resolved against `System.map-7.0.0-1019-nvidia`, extracted from the installed disk itself: 96 of the
-kernel samples sit inside 128 bytes of one function, which is a loop, not a scan over events.
-
-That also corrects the earlier reading of the same run: five scattered single samples looked like an idle
-wait, but they were simply all the log contained once the limit was reached. The guest holds the BQL and
-QMP cannot answer during the loop, which is consistent with executing rather than waiting.
+Resolved against the installed kernel's `System.map-7.0.0-1019-nvidia`, 96 samples sit inside 128 bytes
+of `update_event_printk`. This shows a print-format scan executed, not that it was infinite. The earlier
+claims of an idle wait and then a persistent loop both overinterpreted a censored sample distribution.
 
 `--trace-start N` was added so a sampler can skip a firmware phase whose block count a previous run's
 summary reports, rather than depending on a limit large enough for both phases.
 
-What the loop means is not yet established: `update_event_printk` walks an event's print format, so the
-next step is the loop condition inside that function, read from the installed kernel image.
+The disassembly below explains those sampled instructions; the repeated-count measurement and exception
+trace establish why they were not the cause of the stall.
 
 ### What the loop is made of
 
@@ -491,31 +480,101 @@ disassemble with the virtual address supplied by `--adjust-vma`.
 These are the comparisons and the class lookup of a print-format scan: backslash, quote, table. The
 sampled offsets are the body of that scan, not a call site.
 
-Two readings remain, and the samples alone do not separate them:
+At that point an unterminated format string and slow but finite scanning both fitted the samples.
+Neither was established. Comparing the **total sample count**, not just its offset distribution,
+showed below that no further translated block was executing at all.
 
-1. **An unterminated or enormous format string**, so the scan never meets its terminator. This is a real
-   possibility for a vendor-modified event and would be a kernel defect, not a modelling one.
-2. **Slow but finite progress**, where these offsets are simply where 19 million translated blocks in a
-   180-second window happened to land.
+### No new translated blocks does not mean an interrupt wait
 
-The decisive probe is the same one twice, ten minutes apart: if the offset distribution is unchanged, the
-scan is not advancing and reading 1 holds; if it has moved, the guest is making progress and the stall is
-further on, after the last line it can print.
+The same sampler run, measured ten minutes apart, had **10 062 samples before and 10 062 after**, with
+the harness and QEMU still alive. This rules out the proposed indefinitely retiring format-string loop.
+It does **not** establish WFI, an idle vCPU, or a missing interrupt: repeated faults fetching an unmapped
+exception vector also produce no translated blocks. The earlier interrupt-wait claim is withdrawn.
 
-### The guest halts: the loop reading was wrong, and the correction is measurable
+The harness holds its own QMP client, so a second client can be refused (`ConnectionResetError`).
+`tools/replay_and_probe.py` bypasses that ownership issue by replaying the recorded argv with an
+unowned socket. The later context probes likewise used one direct-launch QMP owner.
 
-The same sampler run, measured twice ten minutes apart: **10 062 samples before and 10 062 after**, with
-the harness and QEMU both still alive. No new translated block executed in ten minutes, so the guest is
-**halted**, not scanning format strings. `update_event_printk` was the last burst of work before it
-stopped, and the concentration there is what the last moments of a boot look like, not a loop.
 
-That resolves the contradiction the earlier probes created: QMP could not answer while the guest was
-executing, and the sampler saw nothing afterwards because there was nothing to see. A halted vCPU waits
-for an interrupt that this profile does not deliver, and the register file at the halt is the thing that
-names which one — the QMP socket question is separate and still open, because the harness holds its own
-QMP client, so a second client is refused (`ConnectionResetError`) rather than answered slowly. Probing
-the monitor therefore needs QEMU launched directly with a socket no other process holds.
+## The decisive exception trace: secure permission-indirection state leaked across worlds
 
-This is recorded as the current limit of the profile: the installed kernel reaches `scmi_core`, runs the
-trace-event pass, and halts with no further output, on every attempt, for as long as an hour.
+The first `--trace-exceptions` (`-d int`) run, `20261111T154523.547381Z`, preserved the first exception
+entering `0x200` in `first-vector-fault.log`, with the full trace in `qemu.log` and the last kernel line
+in `serial.log` (`scmi_core`, kernel time 5.401990 s):
 
+```text
+NS EL2 SMC: ELR=0x87991f08
+EL3 -> EL2 dispatcher -> EL1: PC=0x93a7e168
+Prefetch Abort: EL1 -> EL1, ESR=0x8600000f, FAR=ELR=0x93a7e168
+...to EL1 PC 0x200 PSTATE 0x23c5
+Prefetch Abort: EL1 -> EL1, ESR=0x86000005, FAR=ELR=0x200
+```
+
+`EC=0x21`, `IFSC=0x0f` is an instruction permission fault at level 3, at STMM's correct resume address.
+Only the subsequent `IFSC=0x05` faults are level-1 translation faults fetching the unmapped vector.
+It is not an SCMI handshake, an idle wait, or a corrupted return address.
+
+The instrumented direct replay, `20261111T155336.769648Z-context-before`, preserved `registers.log`,
+`first-vector-fault.log`, `measurement.json`, `serial.log`, the monitor binary and command/hashes:
+
+- QMP reports `running: true`; the stopped register file explicitly reports **`S EL1h`**, PC `0x200`,
+  SP/FP `0x93a7bce0`, LR `0x93a779d8`. The faulting context is **secure STMM**, not Linux.
+- At its **first secure save**, before UEFI ran, `VBAR_EL1=0`, `TCR2_EL1=0`, `TCR2_EL2=0`.
+  The monitor later restores that saved zero vector base correctly. This establishes the value at
+  yield, not a complete earlier history of vector-register writes. No evidence implicates Linux's
+  vector base being zeroed by the monitor.
+- At the post-`scmi_core` request, NS `VBAR_EL1=0xffff800080011000`, both `TCR2` registers are `2`
+  (`PIE=1`), and `HCRX_EL2=0xc04800`. After the secure restore, its legacy TTBR/TCR/SCTLR and zero
+  vector base are restored, **but both live `TCR2` values remain `2`**. The old monitor omitted them.
+- This QEMU registers AArch64 `TCR2_EL1/EL2`, `PIR_EL1/EL2`, `PIRE0_EL1/EL2` and `HCRX_EL2` with
+  one storage location each, not security-state banks. SCR feature enables permit accesses but do not
+  switch this state. Linux's indirect permissions were being applied to STMM's legacy descriptors.
+
+`monitor.c` now saves/restores that stage-1 permission-indirection group and `HCRX_EL2` per world.
+It discovers optional register support once from `ID_AA64MMFR3_EL1` and `ID_AA64MMFR1_EL1`, restores
+the controls/tables while the MMUs are off, and leaves SCR's feature enables unchanged. This restores
+the secure values rather than masking Linux's features. The supported profile uses `-cpu max`, where
+MMFR3 itself exists; this is not a portable probe for arbitrary older cores. `--flash-trace` logs
+saved/live vector and translation controls at each save/restore.
+
+The existing synthetic world-switch test now identity-maps executable secure RAM using legacy 4 KiB
+pages, enables NS PIE in both regimes with a no-access permission index, and verifies NS
+TCR2/PIR/PIRE0/HCRX state after two round trips. The final fixture reproduces the **same `0x8600000f`
+level-3 instruction permission fault** against the pre-fix monitor and passes against the fixed one
+(`regression-permission-trace.log`, `regression-before-final.log` and `regression-after.log` beside
+the context-before capture). Test coverage is executable, not a source-text assertion.
+
+### The fixed installed disk reaches its own systemd
+
+`20261111T160507.692000Z-context-fixed` replays the same installed-disk input, QEMU and unchanged
+vendor images with a fixed traced monitor, 2 GiB allocation and the unchanged 512 MiB admission
+reserve. Its `serial.log` records:
+
+```text
+[    2.784314] scmi_core: SCMI protocol bus registered
+[   18.422226] Run /init as init process
+[   38.672726] EXT4-fs (nvme0n1p2): mounted filesystem ... ro with ordered data mode.
+[   45.105066] systemd[1]: systemd 255.4-1ubuntu8.12 running in system mode
+Welcome to Ubuntu 24.04.4 LTS!
+[   55.183342] EXT4-fs (nvme0n1p2): re-mounted ... r/w.
+```
+
+`/init` was observed after 80.3 seconds of QEMU wall time; capture continued another 180 seconds.
+The post-kernel relay trace shows secure `TCR2_EL1/EL2=0`, PIR/PIRE0/HCRX all zero, followed by
+NS `TCR2_EL1/EL2=2`, `PIR_EL1/EL2=0xcc880e0ac0800000`,
+`PIRE0_EL1/EL2=0x5010908070320000`, `HCRX_EL2=0xc04800`. The NS vector base remains nonzero.
+Secure STMM now answers the request and Linux proceeds past the former fault. `measurement.json`
+indexes those lines; `registers.log` at the end reports Linux running in **NS EL2h**, not `0x200`.
+
+This establishes the installed-root boot through initramfs, root mount and systemd, not a completed
+desktop or login. At the end of the bounded capture, AppArmor was still loading profiles and
+`nvidia-remove-gnome-software` had a startup job in progress; neither is established as another stall.
+No login prompt was observed. GCS and other optional register-context groups have not been
+independently exercised; this change fixes the measured permission-indirection leak, not every
+possible extension-state leak. GPU, physical NIC firmware and production isolation remain outside
+the profile's claim. The recovery boot was not repeated for this change.
+
+Final verification for this change: `python3 -m unittest discover -s tests -q` ran **413 tests,
+51 skipped, OK**. With `SPARK_QEMU` set, all three monitor integration tests passed, including the
+two-CPU start and memory-sharing tests as well as the strengthened permission-context test. Their
+output is preserved as `unittest.log` and `monitor-integration-tests.log` in the fixed run.
