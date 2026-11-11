@@ -762,6 +762,12 @@ void handle(u64 *r, u64 level) {
         /* Bit 0: a 32-bit variant is answered. Bit 1: a 64-bit variant is answered. Only the calls
          * this monitor really answers are advertised. */
         u32 feature = (u32)r[1];
+        /* Linux asks PSCI whether SMCCC_VERSION exists before enabling its
+         * SMCCC 1.2 register transport. Without this, arm_ffa never probes. */
+        if (feature == 0x80000000) {
+            r[0] = 0;
+            return;
+        }
         r[0] = (feature == 0x84000004 || feature == 0xc4000004) ? 3 : -1UL;
         return;
     }

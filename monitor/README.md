@@ -27,6 +27,9 @@ supported wire format and the unchanged firmware's fixed-buffer restriction.
 Unsupported calls return errors. This is a compatibility subset, not an FF-A
 conformance implementation or a replacement for production Hafnium/TF-A.
 
+PSCI_FEATURES advertises the implemented SMCCC_VERSION call, which returns
+exactly SMCCC 1.2 (`0x00010002`), so Linux can enable its register conduit.
+
 The real MM firmware implements UEFI variables. `nor.c` supplies its peer flash
 interface using a NOR variable partition at flash offset `0x03000000` (or `0x0`
 when booting a whole-device `--flash-image`), sized by `NOR_SIZE` (32 MiB
