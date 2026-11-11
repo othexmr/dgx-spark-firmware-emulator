@@ -790,6 +790,29 @@ clip ends, zero/unset, and exact inverse/forward round trips including
 fractional-duty clamp 4501 through both packet layouts. None of the model's
 RPM values is a tachometer measurement.
 
+Retained run **`20261111T194757.684450Z`** exercises this implementation on
+2.155.11, with the default target and the same installed disk. It records
+`SET_STATE_RC=0`, `state=3/12 hottest=59.9C`, and
+`HWMON=/sys/class/hwmon/hwmon2 NAME=dgx_ec_fan FAN1=4500 FAN2=4500`.
+The corresponding monitor write trace is:
+
+```text
+EC-PACKET request=0x0000119400020501 lower-floor=0x0000000000001194 duty-source=inverse-estimate model-duty-percent=0x000000000005e7b8/0x0000000000001e3c,0x000000000005e7b8/0x0000000000002d5a model-rpm-estimate=0x0000000000001194,0x0000000000001194
+```
+
+The CLI's `automatic` command returns 0, status returns to `state=0/12`,
+and the same hwmon attributes read 1260/1890. The monitor records:
+
+```text
+EC-PACKET request=0x0000ffff00020501 lower-floor=0x000000000000ffff duty-source=unset-model-baseline model-duty-percent=0x000000000001a748/0x0000000000001e3c,0x0000000000027aec/0x0000000000002d5a model-rpm-estimate=0x00000000000004ec,0x0000000000000762
+```
+
+Thus the packet floor, explicit model duty, forward estimate, module
+readback, and hwmon publication agree in one retained guest capture.
+`fan-gap-evidence.json` indexes ANSI-stripped serial lines. This particular
+run used a signed but not-yet-trusted module; signing and trust are separate
+checks below.
+
 ## Default-target boot and native ACPI selection
 
 Retained run **`20261111T191435.858956Z`** boots the installed NVMe image with
@@ -849,4 +872,123 @@ No manual `_FSL` writes were performed: native ownership and transport selection
 are proven, not physical cooling or safe automatic clamp restoration.
 The external fan checkout, shipping DMI gate and vendor images remain
 unchanged; this is still the explicit lab-identity build.
+
+
+## Signed module and cold-boot MOK consent with Secure Boot off
+
+Signing and enrollment are exercised; **an `E` taint with Secure Boot off
+is expected behaviour, not an emulator gap**. The lab intentionally leaves
+Secure Boot disabled. Enrollment does not override that trust policy.
+
+In `20261111T191435.858956Z`, the guest generated a disposable local signing
+key and signed a copy of the already-built lab-identity module:
+
+```sh
+umask 077
+mkdir -p /root/spark-lab-signing
+openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
+    -subj '/CN=DGX Spark emulator lab signing/' \
+    -addext subjectKeyIdentifier=hash \
+    -addext basicConstraints=critical,CA:FALSE \
+    -addext extendedKeyUsage=codeSigning,1.3.6.1.4.1.2312.16.1.2 \
+    -outform DER -keyout /root/spark-lab-signing/MOK.priv \
+    -out /root/spark-lab-signing/MOK.der
+cp /root/spark-fan-module/dgx_ec_fan_control.ko /root/dgx_ec_fan_control-signed.ko
+/lib/modules/$(uname -r)/build/scripts/sign-file sha256 \
+    /root/spark-lab-signing/MOK.priv /root/spark-lab-signing/MOK.der \
+    /root/dgx_ec_fan_control-signed.ko
+modinfo -F signer /root/dgx_ec_fan_control-signed.ko
+mokutil --import /root/spark-lab-signing/MOK.der
+```
+
+`SIGN_FILE_RC=0`; `modinfo` reports **`DGX Spark emulator lab signing`**.
+The retained signed module's SHA-256 is
+`a778f8b891b353ecef6f5b692b233052205bfa681f67fc6a18e9c421413d9ab2`;
+the public DER certificate's SHA-256 is
+`cedb731b602b0255812ed03afa18f0d2d50e90bf56b72b0c758a0362328b6013`.
+Both are retained under that ignored run directory, not published binaries.
+Only the public certificate and signed module were exported from the
+snapshot. The private key remained inside the discarded guest snapshot.
+For subsequent snapshots the same public certificate and signed artifact
+were staged as `MOK.DER` and `FANSIGN.KO` in the isolated disk's ESP.
+Copy `FANSIGN.KO` to a lower-case `.ko` guest path before `modinfo`/`insmod`.
+The external fan checkout, kernel, shim and vendor firmware were not edited.
+
+The first request and a repeated `mokutil --import /boot/efi/MOK.DER` in
+`20261111T194757.684450Z` both return 0. Import is only a pending request:
+that run's `mokutil --test-key` still says `is not enrolled`. Actual
+interactive consent is retained in **`20261111T200749.834546Z`**:
+`Perform MOK management` → `Enroll MOK` → `Continue` →
+`Enroll the key(s)?` → `Yes` → password → `Reboot`. The harness forwards
+serial Enter/down-arrow input; the password is the disposable enrollment
+password, not the signing private key.
+
+Guest `systemctl reboot` could not reset the emulated machine
+(`Reboot failed -- System halted`, PSCI `0x84000009`). The working procedure
+was to stop the harness, retaining NOR state, then cold-start it. An earlier
+menu attempt timed out into the modelled watchdog; it is not counted as
+consent. After completing the menu and saving state, cold-boot run
+**`20261111T201056.330138Z`** used:
+
+```sh
+python3 tools/boot_spark.py --firmware-version 2.155.11 --memory 2G \
+    --timeout 3600 --state-file firmware/state/spark-mok-enroll.bin \
+    --nvme-image firmware/state/install-target-40g.img \
+    --rot-functional --no-setup-escape --flash-trace --ffa-ec
+```
+
+Its retained `serial.log` has the actual login and these results:
+
+```text
+SecureBoot disabled
+Platform is in Setup Mode
+/boot/efi/MOK.DER is already enrolled
+MOK_TEST_RC=1
+SIGNER=DGX Spark emulator lab signing
+TAINT_BEFORE_TRUSTED=4096
+TRUSTED_INSMOD_RC=0
+TAINT_AFTER_TRUSTED=12288
+TRUSTED_MODULE_TAINT=OE
+dgx_ec_fan_control: module verification failed: signature and/or required key missing - tainting kernel
+```
+
+Here `mokutil --test-key` uses exit 1 for the affirmative result; the text
+and `--list-enrolled` certificate identify enrollment. The `TRUSTED_*`
+marker names identify the attempted post-enrollment load, **not successful
+kernel trust**. Both `.platform` and `.machine` keyrings are empty
+(`keyring is empty`); guest configuration has
+`CONFIG_LOAD_UEFI_KEYS=y` and `CONFIG_INTEGRITY_MACHINE_KEYRING=y`.
+The same signed module still binds the FF-A packet service and completes
+state `0/12 → 3/12 → 0/12`, with hwmon 4500/4500 at state 3.
+
+The missing trust is deliberate: the Secure Boot gate
+`efi_enabled(EFI_SECURE_BOOT)` is false. The Ubuntu MOK trust path
+(`efi_trust_mok_keys`) must allow the certificate into the kernel's trusted
+keyrings; enrollment alone cannot do so with Secure Boot disabled.
+The upstream [UEFI certificate loader](https://github.com/torvalds/linux/blob/v6.19/security/integrity/platform_certs/load_uefi.c)
+likewise returns before loading MOK when `arch_ima_get_secureboot()` is
+false, explicitly because MOK cannot be trusted in that mode. A signature
+without a trusted verification key therefore leaves **`E` (8192)** set.
+**`O` (4096)** remains by definition for out-of-tree code and was already
+present before loading the fan module; taint bits are sticky within a boot.
+`4096 → 12288` and module `OE` are the faithful result, not a reason to
+suppress verification or clear taint.
+
+The untested path to removing `E` requires owner-approved platform key
+provisioning, Secure Boot enabled, a verified shim/GRUB/kernel chain, and
+the enrolled MOK accepted by the kernel's MOK trust/keyring path before
+module verification. None of those prerequisites was bypassed or claimed.
+Enabling Secure Boot would change the lab's intentional security posture
+and is not part of this fan experiment. Even then, `O` would remain.
+The signing/enrollment path and expected Secure-Boot-off behaviour are
+closed evidence; Secure-Boot-on verification remains untested.
+
+Final checks for the follow-on changes, with no guest running:
+`python3 -m unittest discover -s tests -q` reports **413 tests, 51 skipped,
+OK** (exit 0); `python3 tools/check_publication.py` reports
+`Publication check passed: no tracked firmware/local artifacts detected.`
+(exit 0). The cold-boot run retains `unittest.log`,
+`publication-check.log` and `fan-gap-evidence.json`. Monitor integration
+tests were not rerun for this follow-on; the 51 skipped cases are not
+claimed as exercised.
 

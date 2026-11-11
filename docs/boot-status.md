@@ -47,6 +47,7 @@ capsule PKCS#7 trust chain or establish authenticated boot.
 | Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia`, 4 KiB pages; default `graphical.target` transaction reaches `multi-user.target` and serial login with no `systemd.unit=` override (2.158.15) |
 | External fan module via FF-A packet model | Explicit lab identity variant loads; CLI state `0 -> 3 -> 0` reads back, with model-computed RPM `1260/1890 -> 4500/4500 -> 1260/1890` (2.155.11; no native ACPI fan declared) |
 | External fan module via native ACPI | Lab identity variant selects already-bound `acpi-fan` for both `PNP0C0B` devices, follows their thermal cooling links, and registers no packet floor device; CLI correctly fails because that device is absent (2.158.15) |
+| Module signing and shim MOK enrollment | Signed lab module reports `DGX Spark emulator lab signing`; interactive consent survives cold boot. Secure Boot is intentionally off, so MOK is not kernel-trusted and `E` correctly remains; out-of-tree `O` also remains |
 | GPU and physical NIC firmware | Not part of this result |
 
 The 13 protocols are Security, Cpu, Metronome, Timer, Bds, WatchdogTimer,
@@ -248,9 +249,32 @@ floor-device census is `FLOOR_DEVICES=0`; the CLI emits
 Native ownership predated `modprobe fan`; no extra module load was required.
 See [the exact evidence and limits](linux-under-the-profile.md#default-target-boot-and-native-acpi-selection).
 
-Packet RPM telemetry now comes from the recovered duty-to-estimate formula,
-with per-fan inverse arithmetic for set clamps and a labelled unset model
-baseline, not a calibrated EC control law. The trace exposes rational duty
-percent and estimate for each fan; no RPM is a physical measurement.
+Packet run **`20261111T194757.684450Z`** records floor `0x1194`, rational
+duties `387000/7740` and `387000/11610`, and forward estimates/readbacks
+4500/4500, then restores `0xffff` and the labelled 14% baseline estimates
+1260/1890. The duty-to-estimate arithmetic and fan ranges are recovered;
+the inverse set-clamp duty, clipping and unset baseline are explicit model
+choices, not a calibrated EC control law or physical RPM measurement.
 See [the provenance boundary](linux-under-the-profile.md#duty-derived-packet-estimates-and-evidence-boundaries).
+
+## Signed module and MOK follow-on
+
+The key and signed `.ko` were generated in the installed guest; the
+artifact reports signer **`DGX Spark emulator lab signing`**. Actual shim
+consent is retained in **`20261111T200749.834546Z`**, followed by cold-boot
+run **`20261111T201056.330138Z`** reporting
+`/boot/efi/MOK.DER is already enrolled`. The same signed artifact loads and
+performs the packet state round-trip.
+
+`SecureBoot disabled` and `Platform is in Setup Mode` are intentional lab
+conditions. The kernel's Secure Boot/MOK trust gate excludes that enrolled
+key from its trusted keyrings: both `.platform` and `.machine` are empty.
+The observed `TAINT_BEFORE_TRUSTED=4096`,
+`TAINT_AFTER_TRUSTED=12288`, `TRUSTED_MODULE_TAINT=OE` are **expected**:
+`E` is untrusted signature (8192), `O` is out-of-tree code (4096).
+Signing/enrollment and faithful Secure-Boot-off behaviour are established;
+no taint was hidden or cleared. Platform key provisioning, Secure Boot
+enablement, the shim/GRUB verification chain and Secure-Boot-on module
+trust remain untested, not silently enabled to remove a bit.
+See [commands, artifact hashes and trust prerequisites](linux-under-the-profile.md#signed-module-and-cold-boot-mok-consent-with-secure-boot-off).
 
