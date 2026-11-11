@@ -91,5 +91,23 @@
     },
     "does_not_revert": "nothing in this interface releases the EC's clamps: unloading the module and writing pwm1_enable=2 both leave the last floor in place. A reboot is the only restore, which is why the module refuses to write without allow_pin=1",
     "read_warmup": "a status read answers 0 on the first call after a gap and the rpm on the second; both status ids behave the same way"
+  },
+  "cross_version": {
+    "what_was_compared": "the fan AML in two DSDTs we hold: the capsule's (vendor UEFI 2.158.15, which reports BIOS 5.36_0ACUM028) and a unit's own (BIOS 5.36_0ACUM027)",
+    "acum027_units": {
+      "dsdt": "no Device (FAN0), no _FSL, no _FST, no WFCF, and none of the four write literals 0x06000790..0x06000793 (grep count 0)",
+      "service": "the SMC service is present anyway: measured on one ACUM027 unit, reads answered 4320 rpm, tracked writes moved the fans, and a 13500 rpm floor produced 8820/12420 rpm and an audible increase"
+    },
+    "acum028_capsule": {
+      "dsdt": "Device (FAN0) present with _FSL/_FST/WFCF and the four write literals",
+      "service": "not measured: no ACUM028 unit was available; the monitor's model of the service is not evidence about firmware"
+    },
+    "reading": "the constants this model uses come from the *newer* firmware's DSDT and work on the older units whose ACPI does not publish a fan device at all, because the module talks to the service directly and needs no ACPI. New-to-old is measured; old-to-new and anything later is inference",
+    "confidence": {
+      "acum027_units": "high - measured end to end on one unit, and all three live units run this build",
+      "acum028": "moderate - the constants are taken from its DSDT and its AML is what the service answered, but it has never been driven",
+      "later_firmware": "inference, not evidence: the function id, endpoint, GUID, status ids and command base are compiled in, so a firmware that moves any of them breaks it. The failure mode is a refused read (the module fails closed) rather than a wrong write"
+    },
+    "what_would_raise_it": "run tools/fan_verify.sh read-only on an ACUM028 unit and compare against the ACUM027 baseline in docs/fan-verify-on-a-unit.md; a robust fix for a future firmware is discovery from ACPI rather than compiled-in constants"
   }
 }

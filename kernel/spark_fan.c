@@ -170,7 +170,7 @@ static int spark_fan_write_bytes(unsigned command, unsigned value)
 
 /* Read one status id, and discard the first answer.
  *
- * Measured on a unit (2026-11-11, spark-04): the first read after a gap is answered **zero** with a
+ * Measured on a unit (2026-11-11, one unit): the first read after a gap is answered **zero** with a
  * success completion code, and the second carries the rpm. That is why the cooling path never saw it —
  * its `0x06000704` read was always the first call of a pair and its `0x06000706` read always the
  * second — and why an earlier version of this module concluded that one id answers zero and the other
@@ -273,7 +273,7 @@ static struct thermal_cooling_device *spark_fan_cdev;
 
 /* ---- hwmon: what fancontrol and pwmconfig actually need --------------------------------------
  *
- * Three facts from the measured write path (2026-11-11, spark-04) shape this interface:
+ * Three facts from the measured write path (2026-11-11, one unit) shape this interface:
  *
  *   - the EC honours a level write and the value sticks;
  *   - `cur_state`, and any rpm readback, reports the fan's *actual* speed and lags the setpoint by
@@ -326,7 +326,18 @@ static int spark_fan_hwmon_read(struct device *dev, enum hwmon_sensor_types type
 	}
 	case hwmon_pwm:
 		if (attr == hwmon_pwm_input) {
-			*val = (long)(spark_fan_setpoint * SPARK_FAN_PWM_MAX / SPARK_FAN_LEVEL_MAX);
+			/* Manual: what was asked for. Otherwise: what the fans are actually at, scaled — a
+			 * supervisor that reads 255 while the firmware is idling the fans at 91 would think
+			 * something else is driving them to maximum. */
+			if (spark_fan_pwm_enable == 1) {
+				*val = (long)(spark_fan_setpoint * SPARK_FAN_PWM_MAX / SPARK_FAN_LEVEL_MAX);
+			} else {
+				unsigned long level = 0;
+
+				if (spark_fan_get_cur_state(NULL, &level))
+					return -EIO;
+				*val = (long)(level * SPARK_FAN_PWM_MAX / SPARK_FAN_LEVEL_MAX);
+			}
 			return 0;
 		}
 		if (attr == hwmon_pwm_enable) {
