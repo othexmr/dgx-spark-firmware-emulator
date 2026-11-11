@@ -44,7 +44,8 @@ capsule PKCS#7 trust chain or establish authenticated boot.
 | Native IPv4 PXE | Bundled Realtek UNDI/SNP/DHCP/PXE drivers obtain a lease and download an EFI program over TFTP |
 | Downloaded EFI execution | Original probe prints a fresh per-run token; complete acknowledged transfer matches the probe bytes |
 | Vendor Linux, under the same profile | The recovery kernel and installer initramfs reach userspace: `Run /init as init process`, the installer banner, `VERSION="1.155.49"` (`docs/linux-under-the-profile.md`, `tests/test_profile_userspace.py`) |
-| Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia` runs `/init`, mounts its ext4 root and starts systemd 255.4 / Ubuntu 24.04.4 LTS after the permission-context fix below |
+| Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia`, 4 KiB pages; serial login reached with the explicit getty test target described below |
+| External fan module via FF-A packet model | Explicit lab identity variant loads; CLI state `0 -> 3 -> 0` reads back, with model-computed RPM `1260/1890 -> 4500/4500 -> 1260/1890` (2.155.11; no native ACPI fan declared) |
 | GPU and physical NIC firmware | Not part of this result |
 
 The 13 protocols are Security, Cpu, Metronome, Timer, Bds, WatchdogTimer,
@@ -173,16 +174,56 @@ mounts `nvme0n1p2` at 38.672 s, starts systemd 255.4 at 45.105 s and prints
 zero and NS PIE/permission values preserved, rather than disabling Linux's features. This is the
 installed kernel and root, not the recovery initramfs.
 
-No login prompt or completed desktop is claimed: the bounded capture ended while AppArmor profiles
+That bounded capture did not reach a login prompt or desktop: it ended while AppArmor profiles
 were loading and a vendor software-removal startup job was still in progress. Neither was diagnosed
-as a stall. GCS and other optional context groups, the recovery boot after this change, GPU and
-physical-device support remain unverified or outside scope.
+as a stall. The later serial-login test below supersedes the login limitation, not the desktop claim.
+GCS and other optional context groups, the recovery boot after this change, GPU and physical-device
+support remain unverified or outside scope.
 
 ## The installed disk's boot stanza
 
-`EFI/ubuntu/grub.cfg` on the installed disk was replaced with an explicit stanza (`keep_bootcon`,
-`earlycon=uart,mmio32,0x16a00000`, `loglevel=8 ignore_loglevel`, `nokaslr`, both console names) because
-the stanza the installer writes stops printing at the bootconsole line. That replacement **stays**: it is
-the difference between a visible boot and a silent one, and the installer's own version is preserved beside
-it as `grub.cfg.orig`.
+`EFI/ubuntu/grub.cfg` on the installed disk was replaced with an explicit stanza because the
+installer's original stops printing at the bootconsole line; the original remains beside it as
+`grub.cfg.orig`. The current isolated login test retains the installed kernel, initrd and root UUID,
+and uses `console=ttyS0,115200 earlycon=uart,mmio32,0x16a00000 systemd.unit=getty.target nokaslr`.
+It deliberately does not request the full vendor multi-user target. The enabled serial getty,
+test root-password provisioning and module staging are recorded in
+[the installed-root test setup](linux-under-the-profile.md#installed-root-serial-login-and-packet-fan-test-setup-2026-11-11);
+these are edits to a throwaway, regenerable installer output, not changes to vendor firmware.
 
+## Installed serial login and packet fan control, 2026-11-11
+
+Run **`20261111T175332.261188Z`** retains one `serial.log` with the real
+`localhost login:` prompt, authenticated root shell, enabled/active
+`serial-getty@ttyS0`, and a natively built module for
+`7.0.0-1019-nvidia` with **4096-byte pages** and matching vermagic.
+`--ffa-ec` opts into FF-A discovery for packet UUID
+`78b04d80-d21d-4986-8acb-467b60247ac5`, endpoint `0x8003`,
+properties `0x0109`, RX/TX ownership and DIRECT_REQ2 packet handling.
+The monitor's implemented SMCCC version is exactly 1.2 (`0x00010002`);
+PSCI advertises that call independently of the EC option.
+
+The module's own log says `transport=FF-A packet scale=EC-RPM` and verifies
+the unset lower clamp on probe. `dgx-fan-control status`, `set-state 3`,
+another `status`, `automatic`, and a final `status` succeed. State reads
+back `0/12 -> 3/12 -> 0/12`; the module's RPM attributes read
+`4500/4500` after the floor write and `1260/1890` after automatic restore.
+Monitor packet traces corroborate floor `0x1194 -> 0xffff`. These are
+computed emulated readings, not physical tachometer/thermal measurements.
+
+**This run exercises a lab identity variant, not the shipping hardware
+DMI gate.** The vendor firmware's unprovisioned defaults report
+`NVIDIA / DGX Spark / DGX Spark`, not the measured retail
+`NVIDIA / NVIDIA_DGX_Spark / P4242`. The shipping module's real refusal
+is retained in `20261111T173830.338200Z`. No vendor defaults were patched:
+the type-1/type-2 table at `uefi.fd` offsets `0x70f660`/`0x70f6cc`
+needs two extra bytes but has only one before the next file.
+`tools/fan-module-lab-identity.patch` changes only a local source copy in
+`firmware/state/`, enabled by `DGX_EC_LAB_IDENTITY`; the external shipping
+checkout and the pinned UEFI/STMM images remain unchanged.
+
+The full command, source/binary provenance, exact disk test hooks and
+limitations are in [the Linux evidence](linux-under-the-profile.md#one-installed-guest-run-reaches-login-and-controls-the-modelled-fan).
+The run keeps `fan-evidence.json`, `run.json` and its tested lab module.
+Full multi-user startup, desktop, the 2.158.15 ACPI transport, the shipping
+DMI gate's success path and physical cooling remain unverified.
