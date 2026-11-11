@@ -473,3 +473,32 @@ summary reports, rather than depending on a limit large enough for both phases.
 What the loop means is not yet established: `update_event_printk` walks an event's print format, so the
 next step is the loop condition inside that function, read from the installed kernel image.
 
+### What the loop is made of
+
+The installed kernel image is on the host (`firmware/state/symbols/Image.bin`, decompressed from the
+`/boot/vmlinuz-7.0.0-1019-nvidia` the guest copied to the ESP), so the sampled offsets can be read
+directly: slice the bytes, wrap them in an ELF with `aarch64-linux-gnu-objcopy -I binary`, and
+disassemble with the virtual address supplied by `--adjust-vma`.
+
+```
+18b0: cmp  w3, #0x5c           ; '\\'
+18b8: cmp  w3, #0x22           ; '"'
+18c0: cbnz w23, +0x90
+18d8: ldrb w0, [x20, w3, sxtw] ; character-class table at 0xffff800081ee90c0
+18dc: cmp  w3, #0x5f           ; '_'
+```
+
+These are the comparisons and the class lookup of a print-format scan: backslash, quote, table. The
+sampled offsets are the body of that scan, not a call site.
+
+Two readings remain, and the samples alone do not separate them:
+
+1. **An unterminated or enormous format string**, so the scan never meets its terminator. This is a real
+   possibility for a vendor-modified event and would be a kernel defect, not a modelling one.
+2. **Slow but finite progress**, where these offsets are simply where 19 million translated blocks in a
+   180-second window happened to land.
+
+The decisive probe is the same one twice, ten minutes apart: if the offset distribution is unchanged, the
+scan is not advancing and reading 1 holds; if it has moved, the guest is making progress and the stall is
+further on, after the last line it can print.
+
