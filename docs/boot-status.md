@@ -130,3 +130,35 @@ UEFI boot, not execution of every component in the SoC image.
 The older `run_spark.py` diagnostic deliberately omits the monitor/MM package.
 It remains useful for SEC/DXE entry checks and explicit failure scenarios;
 its continuations are not the full-boot runner.
+
+## Where a boot of the installed disk ends, 2026-11-11
+
+The vendor installer completes against the profile and the produced disk boots under the vendor UEFI to
+its own kernel (`7.0.0-1019-nvidia`), which is the chain `firmware -> EFI/BOOT/BOOTAA64.EFI -> shim ->
+GRUB -> /boot` with no NVRAM entry. The kernel then reaches `scmi_core` at about four seconds, runs the
+trace-event pass, and **halts** — measured by sampling twice ten minutes apart with no new translated
+block in between. Nothing further is printed, and the guest's own stall detectors never fire, which is
+consistent with a CPU waiting for an interrupt rather than executing.
+
+Three things that used to be blamed for this are now ruled out with measurements:
+
+- **the firmware's FF-A variable loop** — that loop was the ROT services `0x29`/`0x12` being refused.
+  Answering them removes 928 relay exchanges and the kernel starts 490 serial lines earlier. It is not
+  what stops the kernel.
+- **the console** — `0x16a00000` carries a real 16550 in a scratch container, and with `keep_bootcon` plus
+  an explicit `earlycon` the same boot prints all the way to PCI enumeration and `scmi_core`.
+- **an infinite format-string scan** — the sample concentration in `update_event_printk` is the last work
+  before the halt, and ten minutes of wall time added exactly zero samples.
+
+What remains is one named question: which interrupt the halted CPU is waiting for. Answering it needs the
+register file, and the QMP socket cannot supply it while the harness holds its own client — the probe has
+to run against a QEMU launched directly, with a socket no other process owns.
+
+## The installed disk's boot stanza
+
+`EFI/ubuntu/grub.cfg` on the installed disk was replaced with an explicit stanza (`keep_bootcon`,
+`earlycon=uart,mmio32,0x16a00000`, `loglevel=8 ignore_loglevel`, `nokaslr`, both console names) because
+the stanza the installer writes stops printing at the bootconsole line. That replacement **stays**: it is
+the difference between a visible boot and a silent one, and the installer's own version is preserved beside
+it as `grub.cfg.orig`.
+

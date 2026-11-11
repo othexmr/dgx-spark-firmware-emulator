@@ -502,3 +502,20 @@ The decisive probe is the same one twice, ten minutes apart: if the offset distr
 scan is not advancing and reading 1 holds; if it has moved, the guest is making progress and the stall is
 further on, after the last line it can print.
 
+### The guest halts: the loop reading was wrong, and the correction is measurable
+
+The same sampler run, measured twice ten minutes apart: **10 062 samples before and 10 062 after**, with
+the harness and QEMU both still alive. No new translated block executed in ten minutes, so the guest is
+**halted**, not scanning format strings. `update_event_printk` was the last burst of work before it
+stopped, and the concentration there is what the last moments of a boot look like, not a loop.
+
+That resolves the contradiction the earlier probes created: QMP could not answer while the guest was
+executing, and the sampler saw nothing afterwards because there was nothing to see. A halted vCPU waits
+for an interrupt that this profile does not deliver, and the register file at the halt is the thing that
+names which one — the QMP socket question is separate and still open, because the harness holds its own
+QMP client, so a second client is refused (`ConnectionResetError`) rather than answered slowly. Probing
+the monitor therefore needs QEMU launched directly with a socket no other process holds.
+
+This is recorded as the current limit of the profile: the installed kernel reaches `scmi_core`, runs the
+trace-event pass, and halts with no further output, on every attempt, for as long as an hour.
+

@@ -106,3 +106,24 @@ harness therefore grew `--no-setup-escape`, so our own keypress cannot be mistak
 behaviour, and the disk-boot question is being re-asked with it suppressed. A functional ROT answer is
 still not an authentication boundary and nothing here claims one.
 
+## The request shape, as far as the captures support it
+
+Both services carry a leading word whose low byte is the service id and whose upper bits are a length
+or count field; the words after it are the arguments. Measured, not inferred:
+
+| service | request words | repeats |
+| --- | --- | --- |
+| `0x29` | `0x00000129 0x90000000` | once per boot |
+| `0x12` | `0x00000312 0x90000000 0x00000001 0xfcc40d97` then `… 0xb6db6764` | twice, with a different fourth word |
+
+What that supports: `0x29` is asked once, with one argument (`0x90000000`, an address in the secure
+region); `0x12` is asked about a 32-bit value that differs between calls at the same address with the same
+second word, which is the shape of a digest or checksum request rather than a read. What it does **not**
+support is a reply format: the functional transport answers status 0 with no payload words, and the
+firmware's own subsequent behaviour is the only evidence for whether that was enough — which is what the
+checkpoint advance and the moving buffer status showed.
+
+Naming a reply layout from these captures alone would be a guess, and guessing at this interface is what
+took the firmware down once before. The honest state is: request shape measured, reply shape still
+unknown beyond "status 0 is accepted".
+
