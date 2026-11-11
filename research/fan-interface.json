@@ -100,14 +100,20 @@
     },
     "acum028_capsule": {
       "dsdt": "Device (FAN0) present with _FSL/_FST/WFCF and the four write literals",
-      "service": "not measured: no ACUM028 unit was available; the monitor's model of the service is not evidence about firmware"
+      "service": "not measured: no ACUM028 unit was available; the monitor's model of the service is not evidence about firmware",
+      "dsdt_detail": {
+        "call": "_FSL -> WFCF -> WRB with XX0 = 0xC400008D and XX1 = 0x8003 (dsdt.dsl:16111-16112, 16149-16150)",
+        "write": "WFCF writes 0x06000790..0x06000793 with the rpm low byte then high byte, both fans (dsdt.dsl:16120-16133)",
+        "scale": "RPM = FMIN + ((FMAX - FMIN) * level) / 0x64 with FMIN = 0x3CF (975) and FMAX = 0x10FE (4350) (dsdt.dsl:16062-16063)",
+        "consequence": "the function id, endpoint, command ids and level scale this module uses are the newest firmware's own AML constants, not values inferred from behaviour. What is still unproven on ACUM028 is the service that answers behind the call"
+      }
     },
     "reading": "the constants this model uses come from the *newer* firmware's DSDT and work on the older units whose ACPI does not publish a fan device at all, because the module talks to the service directly and needs no ACPI. New-to-old is measured; old-to-new and anything later is inference",
     "confidence": {
       "acum027_units": "high - measured end to end on one unit, and all three live units run this build",
-      "acum028": "moderate - the constants are taken from its DSDT and its AML is what the service answered, but it has never been driven",
+      "acum028": "high by construction, unproven in execution - the newest firmware's DSDT calls this exact function id and endpoint and writes these exact commands with this exact scale, so the interface is the firmware's own; no ACUM028 unit has been available to confirm that the service answers",
       "later_firmware": "inference, not evidence: the function id, endpoint, GUID, status ids and command base are compiled in, so a firmware that moves any of them breaks it. The failure mode is a refused read (the module fails closed) rather than a wrong write"
     },
-    "what_would_raise_it": "run tools/fan_verify.sh read-only on an ACUM028 unit and compare against the ACUM027 baseline in docs/fan-verify-on-a-unit.md; a robust fix for a future firmware is discovery from ACPI rather than compiled-in constants"
+    "what_would_raise_it": "run tools/fan_verify.sh read-only on an ACUM028 unit and compare against the ACUM027 baseline in docs/fan-verify-on-a-unit.md. The remaining question is not whether the interface exists - the firmware documents it - but whether the EC behind it answers on that build"
   }
 }
