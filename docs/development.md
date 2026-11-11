@@ -142,6 +142,14 @@ without re-reading the log.
 
 `--accept-mmap-notify` answers the firmware's DRAM notification (`0xc4000122`) with success instead of
 `NOT_SUPPORTED`. It exists so the two answers can be compared boot for boot; with the default monitor a
+
+**Security note, added after reviewing independent research:** that SMC is not a benign notification.
+Separate work on this platform records that the caller-side wrapper has an **end-wrap bypass** and
+forwards the original `(base, length)` pair to the monitor anyway, so a build with this flag accepts a
+descriptor the caller has already wrapped, and the return value is discarded by the caller — the only
+observable outcome is whether normal-world visibility changed. The flag exists to compare two boot
+answers, it is off by default, and nothing in this repository claims isolation with it on. Do not use it
+as if it were a configuration path.
 boot lands on the same store image either way, so the choice does not affect measured behaviour.
 
 ## Counting reboot cycles instead of seconds
