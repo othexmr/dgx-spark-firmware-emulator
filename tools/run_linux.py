@@ -94,7 +94,8 @@ def machine_arguments(machine: str) -> list[str]:
     raise ValueError(f"unknown machine: {machine}")
 
 
-def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeout=120, disk=None):
+def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeout=120, disk=None,
+        usb_image=None, target=None):
     qemu = shutil.which(qemu) or qemu
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     directory = local_path(ROOT / "firmware" / "runs" / f"linux-{stamp}")
@@ -105,11 +106,29 @@ def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeou
     if disk is not None:
         command += ["-drive", f"file={local_path(disk)},if=none,id=target,format=raw",
                     "-device", "virtio-blk-pci,drive=target"]
+    # The installer mounts its media from /dev/sd?? (or /dev/sr0), and the recovery initramfs
+    # modprobes xhci-plat-hcd, which needs a platform device with a firmware description. This
+    # machine has no such node, so a usb-storage device cannot be reached. A virtio-scsi disk
+    # appears as /dev/sda, which is the device name the installer's globs and mounts accept.
+    if usb_image is not None:
+        usb_image = local_path(usb_image)
+        command += ["-device", "virtio-scsi-pci,id=media",
+                    "-drive", f"if=none,id=media0,file={usb_image},format=raw,snapshot=on",
+                    "-device", "scsi-hd,drive=media0,bus=media.0,serial=SPARKKEY"]
+    # init_mount partitions /dev/nvme0n1 by name, so the install target has to be an nvme device.
+    if target is not None:
+        target = local_path(target)
+        command += ["-drive", f"if=none,id=target,file={target},format=raw,snapshot=on",
+                    "-device", "nvme,drive=target,serial=SPARKTGT"]
     record = {"machine": machine, "memory": memory, "smp": smp, "timeout": timeout,
               "append": append, "kernel_sha256": hashlib.sha256(Path(kernel).read_bytes()).hexdigest(),
               "initrd_sha256": hashlib.sha256(Path(initrd).read_bytes()).hexdigest(),
               "qemu_sha256": hashlib.sha256(Path(str(qemu)).read_bytes()).hexdigest(),
               "command": command}
+    if usb_image is not None:
+        record["usb_image"] = {"path": str(usb_image),
+                               "sha256": hashlib.sha256(usb_image.read_bytes()).hexdigest(),
+                               "write_policy": "snapshot; the source image is never written"}
     log = local_path(directory / "console.log")
     with log.open("wb") as capture:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -159,6 +178,11 @@ def main() -> int:
     parser.add_argument("--smp", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--disk", type=Path, help="an image to attach as virtio-blk")
+    parser.add_argument("--target", type=Path,
+                        help="the install target: init_mount partitions /dev/nvme0n1 by name")
+    parser.add_argument("--usb-image", type=Path,
+                        help="the recovery media as a USB key: recovery init mounts the installer "
+                             "from a USB device, not from the initramfs")
     args = parser.parse_args()
     try:
         if args.recovery:
@@ -169,7 +193,7 @@ def main() -> int:
             kernel, initrd = args.kernel, args.initrd
         kernel = gunzip_image(kernel)
         directory = run(args.qemu, kernel, initrd, args.append, args.machine, args.memory,
-                        args.smp, args.timeout, args.disk)
+                        args.smp, args.timeout, args.disk, args.usb_image, args.target)
         print(directory)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:

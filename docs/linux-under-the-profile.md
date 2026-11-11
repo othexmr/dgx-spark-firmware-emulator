@@ -266,6 +266,44 @@ backs them with an inert region — but they are no longer suspected as the caus
 What that did **not** fix: with a disk present, the installer still stops at its `--- Command Line
 Check` stage for the remainder of a 700-second run, so that stage is a separate blocker from the disk.
 
+That conclusion was premature, and the correction is worth keeping because the wrong version was
+plausible. The installer does not stall after the command-line check: without `noui` it execs
+`/bin/dgx-spark-recovery`, a TUI on a console this profile does not provide, so it goes silent while it
+is working. With `noui` it proceeds, and the next thing it wants is media, not a disk.
+
+## The media is a `/dev/sd??`, and USB cannot supply one here
+
+`init_mount` sleeps five seconds, then for up to ten attempts tries `/dev/sd??` as a partition, `/dev/sd?`
+as a whole-disk ISO, and `/dev/sr0` as ISO, requiring `fastos-release.txt` at the mount root, and drops
+to a shell if none of that works. Two facts decide how this machine can satisfy it:
+
+- `init_prep` runs `modprobe xhci-plat-hcd` — the **platform** xHCI driver. The six `TYPE_XHCI_SYSBUS`
+  controllers the profile creates are memory-mapped correctly, but no firmware node describes them, so
+  no driver binds; the recovery initramfs also carries no generic `xhci_pci`. A `usb-storage` device is
+  therefore unreachable, and pinning it to a controller bus cannot change that.
+- the guest does drive **virtio-scsi**, which names its disk `/dev/sda`.
+
+So the media is attached as a `scsi-hd` on a `virtio-scsi-pci` controller, and `--target` attaches the
+install disk as `-device nvme` because `init_mount` hardcodes `/dev/nvme0n1`. Both are consequences of
+the installer's own contract, not concessions: with them the run reaches
+
+```
+    - No UI
+    - Skipping FW Update
+-- Wait for USB Enumeration
+Mounted /dev/sda1, checking for fastos-release.txt...
+Found fastos-release.txt on /dev/sda1
+-- Format Disk
+nvme0n1: p1 p2
+mkfs.fat 4.2 (2021-01-31)
+```
+
+and stops only because that media had no payload: `init_restore` mounts `/dev/nvme0n1p2`, which the
+payload was supposed to fill, so `DATA_UUID` is empty and it exits on
+`Error: NEWGUID environment variable not set`. `tools/make_recovery_key.py` builds the media the rest of
+the flow needs from the vendor archive — `fastos-release.txt`, `efi.tar.xz`, `fastos.partaa`,
+`fastos.partab` — into a partition on a `virtio-scsi` disk.
+
 ## The FF-A direct-request loop is the secure world's, not the kernel's
 
 The loader passes `efi=noruntime` because an earlier note said the kernel's `efisubsys_init` spins in an
