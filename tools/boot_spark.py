@@ -210,7 +210,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
         allow_marker_only=False, nor_offset=0x3000000, code_offset=None, trace=False,
         accept_mmap_notify=False, gwdt_timeout_ms=None, stop_after_boots=None,
         program_model=None, code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
-        trace_start=0,
+        trace_start=0, trace_exceptions=False,
         extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
         console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False,
         no_setup_escape=False):
@@ -296,7 +296,8 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
                           rot_functional=rot_functional, no_setup_escape=no_setup_escape,
                           console_delay=console_delay, usb_image=usb_image,
                           trace_pc=trace_pc, trace_limit=trace_limit, trace_sample=trace_sample,
-                          trace_start=trace_start, extended_ram=extended_ram,
+                          trace_start=trace_start, trace_exceptions=trace_exceptions,
+                          extended_ram=extended_ram,
                           nvme_images=nvme_images,
                           allow_marker_only=allow_marker_only, firmware_path=firmware_path)
 
@@ -309,7 +310,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                nor_offset=0x3000000, code_offset=None, stop_after_boots=None,
                allow_marker_only=False, firmware_path=None, program_model=None,
                code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
-               trace_start=0,
+               trace_start=0, trace_exceptions=False,
                extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
                console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False,
                no_setup_escape=False):
@@ -382,7 +383,8 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                             else f"unix:{temporary}/qmp,server=on,wait=off"),
                    # cpu_reset is what makes a reboot explainable: the watchdog, which is
                    # what resets the board-faithful image, logs its expiry there.
-                   "-d", "guest_errors,unimp,cpu_reset", "-D",
+                   "-d", ("guest_errors,unimp,cpu_reset,int" if trace_exceptions
+                          else "guest_errors,unimp,cpu_reset"), "-D",
                    str(local_path(directory / "qemu.log"))]
         # Diagnostic only: hold the CPU at reset and expose a GDB stub so a driver can
         # break on a firmware address while the guest runs. Never used for receipts.
@@ -1124,6 +1126,9 @@ def main():
                              "answers 'where is the guest running' for a boot that stops printing")
     parser.add_argument("--trace-limit", type=int, default=0, metavar="N",
                         help="stop logging after N hits (0, the default, means no limit)")
+    parser.add_argument("--trace-exceptions", action="store_true",
+                        help="add QEMU's 'int' log: every exception and interrupt with the EL that "
+                             "takes it, which is how a guest that never wakes is diagnosed")
     parser.add_argument("--trace-start", type=int, default=0, metavar="N",
                         help="do not sample before the N-th executed block: a sampler that runs from "
                              "reset otherwise spends its whole limit on the firmware phase")
@@ -1231,6 +1236,7 @@ def main():
                         program_model=args.program_model, trace_pc=args.trace_pc,
                         trace_limit=args.trace_limit, trace_sample=args.trace_sample,
                         trace_start=args.trace_start,
+                        trace_exceptions=args.trace_exceptions,
                         extended_ram=args.extended_ram,
                         nvme_images=args.nvme_image, qmp_path=args.qmp_alive,
                         console_script=args.console_script, console_after=args.console_after,

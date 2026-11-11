@@ -342,3 +342,37 @@ above the cool-to target in two of the three arms.
 And the floor does not come back: unloading the module or writing `pwm1_enable=2` leaves the EC's clamps
 as last written. **A reboot is the only restore**, which is why the module refuses to write without
 `allow_pin=1`.
+
+## The third firmware: 4.1.0 (banner `0ACUM10`), which declares no fan device — but drives one
+
+The emulator carries three firmware versions, and the third is a different lineage from
+`0ACUM027`/`0ACUM028`: version `4.1.0`, whose banner reads `0ACUM10`. Two measurements decide what can
+be claimed for it.
+
+**Its DSDT does not describe a fan.** Extracted from the capsule by decompressing the `MSS1`/`FILEINFO`
+LZMA stream, then reading the `DSDT` table at its own header:
+
+| image | DSDT bytes | `FAN0` | `_FSL` | `_FST` | `WFCF` | `_TMP` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4.1.0 (`0ACUM10`) | 70 143 | 0 | 0 | 0 | 0 | 9 |
+| 2.155.11 (`0ACUM027`) | 70 143 | 0 | 0 | 0 | 0 | 9 |
+| 2.158.15 (`0ACUM028`) | 71 058 | 3 | 2 | 2 | 3 | 9 |
+
+The first two tables are byte-identical (same sha256), so `0ACUM10` and `0ACUM027` share one ACPI view:
+thermal zones but no fan device, therefore no `_FSL`, no `WFCF` and no rpm literals to write.
+
+**Its firmware still drives the fan endpoint.** Booting that image with the monitor's SMC log enabled
+(`firmware/runs/20261111T122225.531884Z`):
+
+```
+SMC fid=0x00000000c400008d ns=1 a1=0x0000000000008003 a2=0x20418532a0634a88 elr=0x0000000087932864   x2071
+```
+
+2071 calls to `SMC 0xC400008D` with endpoint `0x8003` from the image's own code, before any operating
+system exists. So the interface is live in that firmware; what is absent is its ACPI description.
+
+The consequence for control is concrete: on `0ACUM10` there is **no `_FSL` object to write**, so the
+DSDT-declared floor route does not exist there and only the SMC path can be used — which is the path this
+module already takes. And what the 2071 calls do *not* establish is that any fan value was written: the
+payload is constant across all of them, which is a poll, not a set.
+
