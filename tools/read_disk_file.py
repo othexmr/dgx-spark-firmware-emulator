@@ -108,10 +108,11 @@ class Fat:
                 if attributes & 0x10 and entry[0] == 0x2E:
                     long_name = ""
                     continue
-                short = entry[0:11].decode("ascii", "replace").rstrip()
-                if short and "." in short:
-                    stem, _, extension = short.partition(".")
-                    short = stem.rstrip() + "." + extension.rstrip()
+                # An 8.3 entry has no dot: the name is eight bytes and the extension three, both
+                # space-padded. Splitting on a dot leaves "SYSMAP  TXT" unmatched forever.
+                stem = entry[0:8].decode("ascii", "replace").rstrip()
+                extension = entry[8:11].decode("ascii", "replace").rstrip()
+                short = stem + ("." + extension if extension else "")
                 high, low = struct.unpack_from("<H", entry, 20)[0], struct.unpack_from("<H", entry, 26)[0]
                 yield (long_name or short, attributes, (high << 16) | low,
                        struct.unpack_from("<I", entry, 28)[0])

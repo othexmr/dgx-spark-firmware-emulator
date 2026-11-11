@@ -10,6 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def find_tool(name):
+    """Locate an LLVM tool, including distribution layouts that rename it.
+
+    Debian and Ubuntu install `llvm-objcopy-18` and `/usr/lib/llvm-18/bin/llvm-objcopy`, never an
+    unversioned `llvm-objcopy` on PATH. A caller that forgets to add those to PATH fails here with
+    a message about installing LLVM, which is wrong: the tool is present under another name.
+    """
     result = shutil.which(name)
     if result:
         return result
@@ -17,6 +23,14 @@ def find_tool(name):
                       Path("/opt/homebrew/opt/lld/bin"), Path("/usr/local/opt/lld/bin")):
         if (directory / name).is_file():
             return str(directory / name)
+    versioned = sorted(Path("/usr/lib").glob("llvm-*/bin/" + name), reverse=True)
+    for candidate in versioned:
+        if candidate.is_file():
+            return str(candidate)
+    prefix = name.split("-")[0]
+    for suffix in sorted(Path("/usr/bin").glob(f"{prefix}-*-{name.split('-')[-1]}"), reverse=True):
+        if suffix.is_file() and suffix.name.startswith(name):
+            return str(suffix)
     raise ValueError(f"install LLVM/Clang and LLD; required tool not found: {name}")
 
 

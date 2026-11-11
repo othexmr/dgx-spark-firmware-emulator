@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -119,7 +120,8 @@ def type_script(stream, script: pathlib.Path, after: float, delay: float) -> Non
 
 
 def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeout=120, disk=None,
-        usb_image=None, target=None, console_script=None, console_after=0.0, console_delay=0.5):
+        usb_image=None, target=None, console_script=None, console_after=0.0, console_delay=0.5,
+        console_wait=None):
     qemu = shutil.which(qemu) or qemu
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     directory = local_path(ROOT / "firmware" / "runs" / f"linux-{stamp}")
@@ -161,6 +163,11 @@ def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeou
                                "write_policy": "snapshot; the source image is never written"}
     log = local_path(directory / "console.log")
     typing = None
+    typed = False
+    started = time.monotonic()
+    deadline_at = started + timeout
+    timed_out = False
+    marker = console_wait.encode() if console_wait else None
     with log.open("wb") as capture:
         process = subprocess.Popen(
             command,
@@ -168,25 +175,57 @@ def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeou
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if console_script:
             record["console_script"] = {"path": str(console_script), "typed_after": console_after,
+                                        "waited_for": console_wait,
                                         "lines": len(console_script.read_text().splitlines())}
+
+        def start_typing() -> None:
+            """Type once. A marker is the only reliable trigger: the guest decides when its shell
+            exists, and a fixed delay races it -- a slow boot loses the script entirely."""
+            nonlocal typing, typed
+            if typed:
+                return
+            typed = True
             typing = threading.Thread(target=type_script,
-                                      args=(process.stdin, console_script, console_after,
-                                            console_delay), daemon=True)
+                                      args=(process.stdin, console_script, 0, console_delay),
+                                      daemon=True)
             typing.start()
+            record.setdefault("console_script", {})["typed_at"] = round(
+                time.monotonic() - started, 3)
+
+        seen = bytearray()
+        while process.poll() is None:
+            now = time.monotonic()
+            if now >= deadline_at:
+                timed_out = True
+                break
+            ready, _, _ = select.select([process.stdout], [], [], 0.1)
+            if not ready:
+                if console_script and not typed and marker is None and now - started >= console_after:
+                    start_typing()
+                continue
+            data = os.read(process.stdout.fileno(), 65536)
+            if not data:
+                break
+            capture.write(data)
+            capture.flush()
+            if console_script and not typed:
+                if marker is None:
+                    if now - started >= console_after:
+                        start_typing()
+                else:
+                    seen += data
+                    if marker in seen:
+                        start_typing()
+                    elif len(seen) > 1 << 20:
+                        del seen[: len(seen) - len(marker)]
+        process.terminate()
         try:
-            process.wait(timeout=timeout)
-            timed_out = False
+            out, _ = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            process.terminate()
-            try:
-                out, _ = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                out, _ = process.communicate()
-            if out:
-                capture.write(out)
+            process.kill()
+            out, _ = process.communicate()
+        if out:
+            capture.write(out)
     text = log.read_text(errors="replace")
     record["timed_out"] = timed_out
     record["lines"] = len(text.splitlines())
@@ -222,6 +261,9 @@ def main() -> int:
                         help="type this file's lines into the guest console, one line per Enter")
     parser.add_argument("--console-after", type=float, default=0.0,
                         help="seconds to wait before typing the console script")
+    parser.add_argument("--console-wait", metavar="TEXT",
+                        help="hold the console script until this text appears in the guest output; "
+                             "a marker beats a delay because a slow boot otherwise loses the script")
     parser.add_argument("--console-delay", type=float, default=0.5,
                         help="seconds between typed lines; the guest UART is small and TCG is slow")
     parser.add_argument("--target", type=Path,
@@ -240,7 +282,8 @@ def main() -> int:
         kernel = gunzip_image(kernel)
         directory = run(args.qemu, kernel, initrd, args.append, args.machine, args.memory,
                         args.smp, args.timeout, args.disk, args.usb_image, args.target,
-                        args.console_script, args.console_after, args.console_delay)
+                        args.console_script, args.console_after, args.console_delay,
+                        args.console_wait)
         print(directory)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
