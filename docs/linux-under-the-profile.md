@@ -415,3 +415,33 @@ time. A 2400-second budget is too short for this machine; the documented allowan
 The original ESP stanza is preserved as `EFI/ubuntu/grub.cfg.orig` on the disk, so the verbose line is a
 diagnostic that can be reverted from the same shell that wrote it.
 
+## The stall is a return from an FF-A direct request, and the register file says so
+
+`--qmp-alive` leaves a QMP socket behind, and `human-monitor-command` answers on it — but not promptly:
+69 seconds measured, because while the guest loops inside a translation block it holds the BQL. A short
+timeout reports a hang that is not one. The dump at the stall, once it arrives:
+
+```
+PC=0x0000000000000200  X00=0x00000000c400006f  X01=0x0000000000008004
+X29=0x0000000093a7bce0 X30=0x0000000093a779d8  SP=0x0000000093a7bce0
+PSTATE=0x00000000000023c5 ---- EL1h
+```
+
+Two things are in that line. `x0`/`x1` are the FF-A direct request to STMM — `0xc400006f` with
+endpoint `0x8004`, the pair this monitor relays. And `PC = 0x200` is offset `0x200` of a vector table
+whose base is zero: the synchronous-exception slot for the current EL with SPx, at the address the CPU
+takes when `VBAR_EL1` is unset. A boot that has printed `scmi_core` has long since set `VBAR_EL1`, so
+either the guest was returned to a context whose vector base is zero, or the exception is being taken
+before the kernel's vectors exist.
+
+That makes this a return-address problem at the SMC, not an SCMI handshake: the guest issues the direct
+request to `0x8004`, and the value it resumes at is not where it left. The monitor's relay is the code
+that decides that, so the next probes are its own: what `ELR_EL3` holds across the handover, whether
+`ns_pending` was already set when the request arrived (the monitor answers `unsupported` in that case),
+and whether the secure context it restores is the one that was saved.
+
+A first pass also ruled out the cheap explanations: the trace plugin is not usable for this (its
+per-sample output slows the boot enough that a 900-second run never reaches the kernel), and the
+sampled addresses from that attempt were all firmware, `0xbfab1254` alone accounting for 36 094 of
+81 496.
+

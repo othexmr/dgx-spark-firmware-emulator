@@ -1,5 +1,5 @@
 diff --git a/hw/arm/virt.c b/hw/arm/virt.c
-index 219597c..15499f3 100644
+index 219597c..64658c8 100644
 --- a/hw/arm/virt.c
 +++ b/hw/arm/virt.c
 @@ -29,6 +29,8 @@
@@ -172,7 +172,7 @@ index 219597c..15499f3 100644
      /* Map IO port space */
      sysbus_mmio_map(SYS_BUS_DEVICE(dev), 2, base_pio);
  
-@@ -2526,6 +2629,520 @@ static void virt_set_high_memmap(VirtMachineState *vms,
+@@ -2526,6 +2629,534 @@ static void virt_set_high_memmap(VirtMachineState *vms,
      }
  }
  
@@ -402,6 +402,7 @@ index 219597c..15499f3 100644
 +                            unsigned size)
 +{
 +    SparkRotMailbox *m = opaque;
++    bool functional = m->functional;
 +    switch (addr) {
 +    case 0x10: /* transmit FIFO */
 +        if (m->tx_count < ARRAY_SIZE(m->tx)) {
@@ -426,13 +427,26 @@ index 219597c..15499f3 100644
 +             * to implement one, and guessing at it once crashed the firmware. */
 +            {
 +                GString *message = g_string_new(NULL);
-+                for (unsigned i = 0; i < m->tx_count; i++) {
-+                    g_string_append_printf(message, "%s0x%08x", i ? " " : "", m->tx[i]);
++                for (unsigned word = 0; word < m->tx_count; word++) {
++                    g_string_append_printf(message, "%s0x%08x", word ? " " : "", m->tx[word]);
 +                }
 +                qemu_log_mask(LOG_UNIMP,
 +                              "spark ROT: service 0x%x refused; request[%u] = %s\n",
 +                              m->tx[0] & 0xff, m->tx_count, message->str);
 +                g_string_free(message, true);
++            }
++            if (functional) {
++                /* Only the services a capture shows the firmware calling are answered, and the
++                 * answer carries no authentication: it exists so the caller's own code path can
++                 * run to its next step instead of stopping here. */
++                unsigned service = m->tx[0] & 0xff;
++                if (service == 0x29 || service == 0x12) {
++                    m->reply = service; /* status 0: succeeded, no payload words */
++                    qemu_log_mask(LOG_UNIMP, "spark ROT: service 0x%x answered functionally\n",
++                                  service);
++                } else {
++                    m->reply = service | (1 << 12);
++                }
 +            }
 +            m->tx_count = 0;
 +        } else {
@@ -693,7 +707,7 @@ index 219597c..15499f3 100644
  static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
  {
      MachineState *ms = MACHINE(vms);
-@@ -2538,6 +3155,214 @@ static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
+@@ -2538,6 +3169,215 @@ static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
          vms->memmap[i] = base_memmap[i];
      }
  
@@ -780,8 +794,9 @@ index 219597c..15499f3 100644
 +            memory_region_add_subregion(get_system_memory(), eint_bases[bank],
 +                                       &vms->spark_eint_banks[bank]);
 +        }
-+        if (vms->spark_rot_error_replies) {
++        if (vms->spark_rot_functional || vms->spark_rot_error_replies) {
 +            for (unsigned i = 0; i < ARRAY_SIZE(vms->spark_rot); i++) {
++                vms->spark_rot[i].functional = vms->spark_rot_functional;
 +                memory_region_init_io(&vms->spark_rot[i].iomem, OBJECT(vms),
 +                                      &spark_rot_ops, &vms->spark_rot[i],
 +                                      "spark-rot-error-transport", 0x1000);
@@ -908,7 +923,7 @@ index 219597c..15499f3 100644
      if (ms->ram_slots > ACPI_MAX_RAM_SLOTS) {
          error_report("unsupported number of memory slots: %"PRIu64,
                       ms->ram_slots);
-@@ -2943,6 +3768,21 @@ static void machvirt_init(MachineState *machine)
+@@ -2943,6 +3783,21 @@ static void machvirt_init(MachineState *machine)
      firmware_loaded = virt_firmware_init(vms, sysmem,
                                           secure_sysmem ?: sysmem);
  
@@ -930,7 +945,7 @@ index 219597c..15499f3 100644
      /* If we have an EL3 boot ROM then the assumption is that it will
       * implement PSCI itself, so disable QEMU's internal implementation
       * so it doesn't get in the way. Instead of starting secondary
-@@ -3264,6 +4104,26 @@ static void machvirt_init(MachineState *machine)
+@@ -3264,6 +4119,36 @@ static void machvirt_init(MachineState *machine)
      qemu_add_machine_init_done_notifier(&vms->machine_done);
  }
  
@@ -954,10 +969,20 @@ index 219597c..15499f3 100644
 +    VIRT_MACHINE(obj)->spark_rot_error_replies = value;
 +}
 +
++static bool virt_get_spark_rot_functional(Object *obj, Error **errp)
++{
++    return VIRT_MACHINE(obj)->spark_rot_functional;
++}
++
++static void virt_set_spark_rot_functional(Object *obj, bool value, Error **errp)
++{
++    VIRT_MACHINE(obj)->spark_rot_functional = value;
++}
++
  static bool virt_get_secure(Object *obj, Error **errp)
  {
      VirtMachineState *vms = VIRT_MACHINE(obj);
-@@ -4213,6 +5073,15 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
+@@ -4213,6 +5098,21 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
          NULL, NULL);
      object_class_property_set_description(oc, "acpi",
          "Enable ACPI");
@@ -966,6 +991,12 @@ index 219597c..15499f3 100644
 +                                   virt_set_spark_rot_error_replies);
 +    object_class_property_set_description(oc, "spark-rot-error-replies",
 +        "Opt-in ROT transport failure scenario; unavailable services return errors");
++    object_class_property_add_bool(oc, "spark-rot-functional",
++                                   virt_get_spark_rot_functional,
++                                   virt_set_spark_rot_functional);
++    object_class_property_set_description(oc, "spark-rot-functional",
++        "Answer the ROT services the firmware calls with their success status; a functional "
++        "model only, which authenticates nothing");
 +    object_class_property_add_bool(oc, "spark-fw-lab", virt_get_spark_fw_lab,
 +                                   virt_set_spark_fw_lab);
 +    object_class_property_set_description(oc, "spark-fw-lab",
@@ -1357,10 +1388,10 @@ index 0000000..40a46c3
 +static void rtl_register_types(void) { type_register_static(&rtl_type); }
 +type_init(rtl_register_types);
 diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
-index 22e66d1..68e0b06 100644
+index 22e66d1..c7c2b6f 100644
 --- a/include/hw/arm/virt.h
 +++ b/include/hw/arm/virt.h
-@@ -159,6 +159,17 @@ struct VirtMachineClass {
+@@ -159,6 +159,18 @@ struct VirtMachineClass {
      bool hvf_no_kernel_irqchip_default;
  };
  
@@ -1373,17 +1404,19 @@ index 22e66d1..68e0b06 100644
 +    bool reply_pending;
 +    bool ack_pending;
 +    bool reply_consumed;
++    bool functional; /* answer the services the firmware calls instead of refusing them */
 +} SparkRotMailbox;
 +
  struct VirtMachineState {
      MachineState parent;
      Notifier machine_done;
-@@ -166,6 +177,30 @@ struct VirtMachineState {
+@@ -166,6 +178,31 @@ struct VirtMachineState {
      FWCfgState *fw_cfg;
      PFlashCFI01 *flash[2];
      bool secure;
 +    bool spark_fw_lab;
 +    bool spark_rot_error_replies;
++    bool spark_rot_functional;
 +    SparkRotMailbox spark_rot[2];
 +    MemoryRegion spark_ecam;
 +    MemoryRegion spark_pcif;

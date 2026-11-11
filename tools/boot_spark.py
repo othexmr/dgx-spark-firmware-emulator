@@ -196,7 +196,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
         accept_mmap_notify=False, gwdt_timeout_ms=None, stop_after_boots=None,
         program_model=None, code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
         extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-        console_after=0.0, console_delay=0.03, usb_image=None):
+        console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False):
     qemu = shutil.which(qemu)
     if qemu is None:
         raise ValueError("build the Spark QEMU profile first: python3 tools/build_qemu.py")
@@ -276,6 +276,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
                           stop_after_boots=stop_after_boots, program_model=program_model,
                           code_offset_source=code_offset_source, qmp_path=qmp_path,
                           console_script=console_script, console_after=console_after,
+                          rot_functional=rot_functional,
                           console_delay=console_delay, usb_image=usb_image,
                           trace_pc=trace_pc, trace_limit=trace_limit, trace_sample=trace_sample, extended_ram=extended_ram,
                           nvme_images=nvme_images,
@@ -291,7 +292,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                allow_marker_only=False, firmware_path=None, program_model=None,
                code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
                extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-               console_after=0.0, console_delay=0.03, usb_image=None):
+               console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False):
     firmware_directory = prepared_directory(firmware_version)
     if firmware_path is None:
         firmware_path = firmware_directory / "uefi.fd"
@@ -351,7 +352,8 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
         # kernel sets up an ITS domain from that record and writes to an address nothing backs, so a
         # PCIe function that wants MSI-X defers its probe for ever (-EPROBE_DEFER, measured on the
         # NVMe controllers at 0f:02.0 and 0f:03.0).
-        command = [qemu, "-M", "virt,spark-fw-lab=on,spark-rot-error-replies=on,"
+        rot = "spark-rot-functional=on" if rot_functional else "spark-rot-error-replies=on"
+        command = [qemu, "-M", "virt,spark-fw-lab=on," + rot + ","
                    "gic-version=3,virtualization=on,secure=on,its=on", "-accel", "tcg",
                    "-cpu", "max,sve=off,sme=off,pauth=off",
                    "-m", memory or "2G", "-smp", str(smp or 1),
@@ -564,7 +566,11 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
 
                         if b"Synchronous Exception" in capture or b"MON: abort" in capture:
                             raise RuntimeError("firmware exception; see this run's local serial.log")
-                        if mode is not RunMode.PXE_TEST and not escape_sent and b"Press <DEL>" in capture:
+                        # ESC is "enter Setup" on this firmware, so sending it dismisses nothing:
+                        # it diverts a disk boot into the setup UI. --no-setup-escape exists to
+                        # separate our own keypress from the firmware's behaviour.
+                        if (not args.no_setup_escape and mode is not RunMode.PXE_TEST
+                                and not escape_sent and b"Press <DEL>" in capture):
                             process.stdin.write(b"\x1b")
                             escape_sent = True
                         setup_at = marker_at(b"Aptio Setup - AMI")
@@ -1036,6 +1042,12 @@ def main():
     parser.add_argument("--usb-image", type=Path, metavar="PATH",
                         help="attach this image as a USB key: the recovery media is a USB key on "
                              "hardware and the installer looks for /dev/sd* with fastos-release.txt")
+    parser.add_argument("--no-setup-escape", action="store_true",
+                        help="do not send ESC at the firmware's boot prompt: on AMI that key enters "
+                             "Setup rather than dismissing the prompt")
+    parser.add_argument("--rot-functional", action="store_true",
+                        help="answer the ROT services the firmware calls with their success status "
+                             "instead of refusing them; a functional model that authenticates nothing")
     parser.add_argument("--qmp-alive", type=Path, metavar="PATH",
                         help="put the QMP socket at PATH and leave it there, so another process can "
                              "type into the guest console while the run is going; the run still ends "
@@ -1195,6 +1207,7 @@ def main():
                         extended_ram=args.extended_ram,
                         nvme_images=args.nvme_image, qmp_path=args.qmp_alive,
                         console_script=args.console_script, console_after=args.console_after,
+                        rot_functional=args.rot_functional,
                         usb_image=args.usb_image,
                         accept_mmap_notify=args.accept_mmap_notify,
                         gwdt_timeout_ms=args.gwdt_timeout_ms,
