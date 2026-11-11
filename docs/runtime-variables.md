@@ -77,3 +77,32 @@ It will not make the profile authenticate anything. A ROT service that returns a
 a firmware caller is a functional model, not a security boundary, and nothing here should be described
 as secure boot or measured boot. The value is that the firmware's own code paths stop failing for want
 of an answer, which is what a fidelity emulator is for.
+
+## What the first functional answer changed, measured
+
+With `--rot-functional`, the two services the capture shows the firmware calling are answered with
+status 0 and no payload, everything else still refused:
+
+```
+spark ROT: service 0x29 refused; request[2] = 0x00000129 0x90000000
+spark ROT: service 0x29 answered functionally
+spark ROT: service 0x12 refused; request[4] = 0x00000312 0x90000000 0x00000001 0xfcc40d97
+spark ROT: service 0x12 answered functionally
+spark ROT: service 0x12 refused; request[4] = 0x00000312 0x90000000 0x00000001 0xb6db6764
+```
+
+Three observations, none of them inference:
+
+- **The fourth word changes between calls** — `0xfcc40d97` then `0xb6db6764` — so `0x12` is asked about a
+  value that varies, which is what a digest or checksum of an address range looks like.
+- **The communication buffer's status byte moves** (`0x28`, `0x8d`, `0x44`) where it was frozen while the
+  services were refused. The earlier claim that the buffer was byte-identical on every retry holds only
+  under the refusing transport, and is corrected here.
+- **The firmware passes the checkpoint it used to hang at** (`A9`, `AB`) and reaches the setup UI.
+
+What that does *not* establish is that a boot completes: the setup UI appeared in a run where this
+harness also typed ESC at the firmware's `Press <DEL>` prompt, and ESC is how AMI enters Setup. The
+harness therefore grew `--no-setup-escape`, so our own keypress cannot be mistaken for the firmware's
+behaviour, and the disk-boot question is being re-asked with it suppressed. A functional ROT answer is
+still not an authentication boundary and nothing here claims one.
+
