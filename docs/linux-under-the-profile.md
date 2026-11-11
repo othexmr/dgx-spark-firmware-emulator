@@ -320,3 +320,52 @@ the flag removed for one run, that premise does not hold:
 So the flag is a no-op with a stale justification rather than a workaround. What actually gates EFI
 variables is the firmware's runtime variable service, which is reached through an endpoint this
 monitor does not serve — the same gap, now named precisely instead of hidden behind a flag.
+
+## The installed disk boots to the installed kernel under the vendor UEFI
+
+After `init_restore` completed (37 GB root, `e2fsck`, `resize2fs`, new UUID, fstab and `grub.cfg`
+rewritten), the target was attached to the full-boot runner and the firmware booted it:
+
+```
+Version 2.22.1295. Copyright (C) 2026 AMI … Ver: 0ACUM028
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x000f0510]
+[    0.000000] Linux version 7.0.0-1019-nvidia … 7.0.0-1019.19~24.04.2-nvidia
+[    0.000000] earlycon: uart0 at MMIO32 0x0000000016a00000
+[    0.000000] printk: legacy bootconsole [uart0] enabled
+```
+
+`7.0.0-1019` is the kernel inside the restored root; the recovery media carries `7.0.0-1018`. So the
+chain ran: firmware → `EFI/BOOT/BOOTAA64.EFI` on `nvme0n1p1` → shim → GRUB → `/boot` on `nvme0n1p2` →
+the installed kernel. No NVRAM entry was needed, which is why the earlier `efibootmgr` failure did not
+block this: **the install is complete and the disk is bootable.**
+
+Two things must not be read into that log:
+
+- `boot_spark.py`'s verdict for that run was `setup/navigation not reached before the boot timeout`. That
+  is the runner's firmware-UI check, and with a bootable disk the firmware never enters setup. It is not
+  a statement about the kernel.
+- GRUB prints nothing on this UART. Its console is the EFI text console, which is not modelled, so the
+  gap between the firmware banner and the kernel line is expected.
+
+## Why it goes silent after the bootconsole, and what is *not* established
+
+The kernel stops printing immediately after `legacy bootconsole [uart0] enabled`, and stayed silent for
+the remaining 57 minutes of a 3300-second run. The console model is not the explanation: at `0x16a00000`
+the profile maps a real 16550 (`serial_mm_init`, regshift 2) inside a container, overlapped by a scratch
+window so a vendor-register probe reads zero instead of aborting. Earlycon and the driver therefore talk
+to the same controller.
+
+The log names a suspect the kernel would hit as soon as it walks the EFI memory map:
+
+```
+[SsmpuDxe]: SsmpuDxeQueryTag 207 <#> Failed to find mem_info
+[SsmpuDxe]: SsmpuDxeQueryTag 220 <#> Status=Invalid Parameter
+[SsmpuDxe]: SsmpuDxeEntry 545 <#> Failed to Query MMAP_DISPLAY_FRM
+```
+
+A guest whose RAM starts at 1 GiB depends entirely on that map being right. Whether the silence is an
+incomplete memory map, a hang in early memory init, or something later that stops writing to this
+console is **not established** — the two candidates are named so the next probe starts from evidence
+rather than from a guess. The next probe is a run with `nokaslr ignore_loglevel earlycon keep_bootcon`
+and, if it stays silent, monitor-side tracing of the first post-console accesses.
+
