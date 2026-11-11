@@ -44,8 +44,9 @@ capsule PKCS#7 trust chain or establish authenticated boot.
 | Native IPv4 PXE | Bundled Realtek UNDI/SNP/DHCP/PXE drivers obtain a lease and download an EFI program over TFTP |
 | Downloaded EFI execution | Original probe prints a fresh per-run token; complete acknowledged transfer matches the probe bytes |
 | Vendor Linux, under the same profile | The recovery kernel and installer initramfs reach userspace: `Run /init as init process`, the installer banner, `VERSION="1.155.49"` (`docs/linux-under-the-profile.md`, `tests/test_profile_userspace.py`) |
-| Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia`, 4 KiB pages; serial login reached with the explicit getty test target described below |
+| Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia`, 4 KiB pages; default `graphical.target` transaction reaches `multi-user.target` and serial login with no `systemd.unit=` override (2.158.15) |
 | External fan module via FF-A packet model | Explicit lab identity variant loads; CLI state `0 -> 3 -> 0` reads back, with model-computed RPM `1260/1890 -> 4500/4500 -> 1260/1890` (2.155.11; no native ACPI fan declared) |
+| External fan module via native ACPI | Lab identity variant selects already-bound `acpi-fan` for both `PNP0C0B` devices, follows their thermal cooling links, and registers no packet floor device; CLI correctly fails because that device is absent (2.158.15) |
 | GPU and physical NIC firmware | Not part of this result |
 
 The 13 protocols are Security, Cpu, Metronome, Timer, Bds, WatchdogTimer,
@@ -184,10 +185,11 @@ support remain unverified or outside scope.
 
 `EFI/ubuntu/grub.cfg` on the installed disk was replaced with an explicit stanza because the
 installer's original stops printing at the bootconsole line; the original remains beside it as
-`grub.cfg.orig`. The current isolated login test retains the installed kernel, initrd and root UUID,
-and uses `console=ttyS0,115200 earlycon=uart,mmio32,0x16a00000 systemd.unit=getty.target nokaslr`.
-It deliberately does not request the full vendor multi-user target. The enabled serial getty,
-test root-password provisioning and module staging are recorded in
+`grub.cfg.orig`. The isolated login test retains the installed kernel, initrd and root UUID.
+The 2026-11-11 run used `systemd.unit=getty.target`; the follow-on default-target test
+removes that override and uses only
+`console=ttyS0,115200 earlycon=uart,mmio32,0x16a00000 nokaslr`.
+The enabled serial getty, test root-password provisioning and module staging are recorded in
 [the installed-root test setup](linux-under-the-profile.md#installed-root-serial-login-and-packet-fan-test-setup-2026-11-11);
 these are edits to a throwaway, regenerable installer output, not changes to vendor firmware.
 
@@ -225,5 +227,30 @@ checkout and the pinned UEFI/STMM images remain unchanged.
 The full command, source/binary provenance, exact disk test hooks and
 limitations are in [the Linux evidence](linux-under-the-profile.md#one-installed-guest-run-reaches-login-and-controls-the-modelled-fan).
 The run keeps `fan-evidence.json`, `run.json` and its tested lab module.
-Full multi-user startup, desktop, the 2.158.15 ACPI transport, the shipping
-DMI gate's success path and physical cooling remain unverified.
+That historical run did not establish full multi-user startup, desktop, the
+2.158.15 ACPI transport, trusted signing, the shipping DMI gate's success path,
+or physical cooling. Follow-on evidence is recorded below.
+
+## Default-target and ACPI follow-on
+
+Run **`20261111T191435.858956Z`** retains the 2.158.15 kernel command line
+without `systemd.unit=`, the actual `localhost login:` prompt, and guest
+journal line `Reached target multi-user.target - Multi-User System.`.
+`MULTI_USER_ACTIVE=active` and `DEFAULT_TARGET=graphical.target` corroborate
+the completed natural default transaction. Some hardware/network-dependent
+services fail; reaching the target is not a healthy desktop or GPU claim.
+
+The lab module logs `transport=ACPI native acpi-fan selected` for both
+`PNP0C0B` platform devices. Their driver links point to `acpi-fan`, and
+`thermal_cooling` resolves to two type-`Fan` cooling devices. The packet
+floor-device census is `FLOOR_DEVICES=0`; the CLI emits
+`ERROR expected one 'dgx_ec_fan_floor' cooling device, found 0` and exits 1.
+Native ownership predated `modprobe fan`; no extra module load was required.
+See [the exact evidence and limits](linux-under-the-profile.md#default-target-boot-and-native-acpi-selection).
+
+Packet RPM telemetry now comes from the recovered duty-to-estimate formula,
+with per-fan inverse arithmetic for set clamps and a labelled unset model
+baseline, not a calibrated EC control law. The trace exposes rational duty
+percent and estimate for each fan; no RPM is a physical measurement.
+See [the provenance boundary](linux-under-the-profile.md#duty-derived-packet-estimates-and-evidence-boundaries).
+

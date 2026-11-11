@@ -743,3 +743,110 @@ Host fan-model cases exercise both direct-request layouts, capability
 encoding, floor readback, saturation, automatic restore and rejected
 operation/length/UUID/endpoint combinations. The run retains
 `unittest.log` and `monitor-integration-tests.log`.
+
+## Duty-derived packet estimates and evidence boundaries
+
+The packet model now uses the recovered EC's published-estimate equation:
+
+```text
+estimate = min + (duty - 14) * (max - min) / 86
+duty < 14 -> estimate 0; duty > 100 -> estimate max
+CPU:  min=1260, max=9000
+rear: min=1890, max=13500
+```
+
+For each nonzero, set clamp, it clips the clamp to that fan's range and
+solves the same equation for duty:
+`duty = 14 + (clipped_clamp - min) * 86 / (max - min)`.
+Zero selects zero duty and a zero estimate. Rational percent retains the
+fraction rather than inventing the EC's PWM resolution: the trace prints
+`numerator/denominator`, with denominator `max-min`. The forward equation
+applied to that rational duty returns the clipped clamp exactly. For example,
+4500 gives CPU `387000/7740 = 50%`, rear `387000/11610 = 33 1/3%`, and both
+estimates are 4500. This is algebraic consistency, **not evidence that a real
+EC applies those duties for that clamp**.
+
+For unset clamp `0xffff`, the model does not execute the EC's thermal curve.
+It uses a **model baseline** of 14% duty and estimates 1260/1890; the trace
+labels this `duty-source=unset-model-baseline`, versus
+`duty-source=inverse-estimate` for set clamps. Every traced packet includes
+the clamp, each duty ratio in percent, and each `model-rpm-estimate`. Packet
+estimates have independent state from the OEM/AML fan path.
+
+The provenance boundary is:
+
+| Pipeline part | Evidence or assumption |
+| --- | --- |
+| Duty-to-published-estimate formula, 14..100 duty bounds, CPU/rear ranges | Recovered EC code, described in [the EC finding](fan-control-from-dsdt.md); not a new physical measurement |
+| Clamp value and wire readback | Observed guest module/CLI requests against the packet model |
+| Set clamp to duty | Algebraic inverse with per-fan range clipping; a model choice, not a recovered controller or calibrated PWM mapping |
+| Zero clamp to stopped model fans | Explicit model policy; a zero physical lower bound does not imply ownership or that an EC stops its fans |
+| Unset clamp to 14% and minimum estimates | Explicit model baseline; the real automatic thermal curve is not simulated |
+| Tachometer-zero suppression, wrapping estimate protection, slew, >5% republication | Known EC behaviours, not simulated by this synchronous packet model |
+
+Host unit coverage exercises every integer duty from 0 through 101, an
+oversized duty, both fan ranges, invalid index/zero denominator, both clamp
+clip ends, zero/unset, and exact inverse/forward round trips including
+fractional-duty clamp 4501 through both packet layouts. None of the model's
+RPM values is a tachometer measurement.
+
+## Default-target boot and native ACPI selection
+
+Retained run **`20261111T191435.858956Z`** boots the installed NVMe image with
+unchanged UEFI/STMM **2.158.15**, `--ffa-ec`, `--rot-functional`,
+`--no-setup-escape`, `--flash-trace`, and 2 GiB allocation. The ESP stanza
+now has **no `systemd.unit=` override**. Its kernel command line in
+`serial.log` is:
+
+```text
+BOOT_IMAGE=/boot/vmlinuz-7.0.0-1019-nvidia root=UUID=69909700-2b7b-41a4-a817-5d87b823349f ro console=ttyS0,115200 earlycon=uart,mmio32,0x16a00000 nokaslr
+```
+
+The same capture has the actual `localhost login:` prompt and, after
+authenticated login, these guest journal/status lines:
+
+```text
+Reached target multi-user.target - Multi-User System.
+Reached target graphical.target - Graphical Interface.
+MULTI_USER_ACTIVE=active
+DEFAULT_TARGET=graphical.target
+```
+
+The target messages were retrieved with
+`journalctl -b --no-pager -o cat -g 'Reached target (multi-user|graphical).target'`,
+not fabricated with `echo` or reached by manually starting a different target.
+First-boot snap seeding and Docker startup took time; the natural default
+transaction finished without masking, stopping, or replacing services. This
+is **not a healthy-desktop claim**: DGX OOBE, CPU-governor and NVIDIA CDI
+services fail on the incomplete hardware/network model, and snap seeding
+reports unavailable online prerequisites even though its script exits 0.
+
+The unchanged ACPI-first selection in the lab-identity module succeeds:
+
+```text
+FIRST_INSMOD_RC=0
+acpi-fan PNP0C0B:00: transport=ACPI native acpi-fan selected; use thermal_cooling symlink, no duplicate packet cooling device
+acpi-fan PNP0C0B:01: transport=ACPI native acpi-fan selected; use thermal_cooling symlink, no duplicate packet cooling device
+dgx_ec_fan_control: FF-A packet candidate UUID=78b04d80-d21d-4986-8acb-467b60247ac5 not attempted: ACPI fan declared
+FLOOR_DEVICES=0
+ERROR expected one 'dgx_ec_fan_floor' cooling device, found 0
+ACPI_STATUS_RC=1
+```
+
+Kernel timestamps are omitted here; the exact lines remain in `serial.log`.
+The census reads every thermal cooling device's `type`, rather than assuming
+absence from module load success. `dgx-fan-control status` is expected to
+fail: it operates the packet floor device, which ACPI selection deliberately
+does not register. Both native platform devices have driver link
+`/sys/bus/platform/drivers/acpi-fan`; their `thermal_cooling` links resolve
+to `/sys/devices/virtual/thermal/cooling_device0` and `cooling_device1`,
+respectively, each with type `Fan`.
+
+**Loading `fan` was not required.** The first `insmod` succeeded before
+`modprobe fan`; native `acpi-fan` was already bound. The later `modprobe`
+returned 0, and a deliberate module unload/reload returned `ACPI_RELOAD_RC=0`.
+No manual `_FSL` writes were performed: native ownership and transport selection
+are proven, not physical cooling or safe automatic clamp restoration.
+The external fan checkout, shipping DMI gate and vendor images remain
+unchanged; this is still the explicit lab-identity build.
+
