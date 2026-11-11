@@ -343,11 +343,11 @@ And the floor does not come back: unloading the module or writing `pwm1_enable=2
 as last written. **A reboot is the only restore**, which is why the module refuses to write without
 `allow_pin=1`.
 
-## The third firmware: 4.1.0 (banner `0ACUM10`), which declares no fan device — but drives one
+## The third firmware: 4.1.0 (banner `0ACUM10`), which declares no fan device
 
 The emulator carries three firmware versions, and the third is a different lineage from
-`0ACUM027`/`0ACUM028`: version `4.1.0`, whose banner reads `0ACUM10`. Two measurements decide what can
-be claimed for it.
+`0ACUM027`/`0ACUM028`: version `4.1.0`, whose banner reads `0ACUM10`. Two measurements decide what can be
+claimed for it.
 
 **Its DSDT does not describe a fan.** Extracted from the capsule by decompressing the `MSS1`/`FILEINFO`
 LZMA stream, then reading the `DSDT` table at its own header:
@@ -361,18 +361,47 @@ LZMA stream, then reading the `DSDT` table at its own header:
 The first two tables are byte-identical (same sha256), so `0ACUM10` and `0ACUM027` share one ACPI view:
 thermal zones but no fan device, therefore no `_FSL`, no `WFCF` and no rpm literals to write.
 
-**Its firmware still drives the fan endpoint.** Booting that image with the monitor's SMC log enabled
-(`firmware/runs/20261111T122225.531884Z`):
+**What its boot calls are not.** Booting that image with the monitor's SMC log shows 2071 calls to
+`SMC 0xC400008D` with `x1 = 0x8003` and a constant `x2 = 0x20418532a0634a88`. It is tempting to read that
+as the fan service — an earlier version of this note did — and it is wrong:
 
-```
-SMC fid=0x00000000c400008d ns=1 a1=0x0000000000008003 a2=0x20418532a0634a88 elr=0x0000000087932864   x2071
-```
+- `0xC400008D` is `FFA_MSG_SEND_DIRECT_REQ2`, the FF-A direct-request call, not a fan id;
+- `0x8003` is `SPARK_FIRMWARE_PARTITION_ID` in `soc/uefi/include/FirmwareInventoryLayout.h` of the
+  recovered firmware source;
+- the constant is the low half of service UUID `884a63a0-3285-4120-83aa-eec008a0a546`, the
+  firmware-inventory service, whose command 12 reads the EC version at `0x06000760` and the PD versions at
+  `0x06000770`/`0x06000774`.
 
-2071 calls to `SMC 0xC400008D` with endpoint `0x8003` from the image's own code, before any operating
-system exists. So the interface is live in that firmware; what is absent is its ACPI description.
+So those calls are version reads by `FmpEndOfDxe` and `SmbiosType45Dxe`. Whether the ASUS image's fan path
+is live remains open, and it is not answered at `0x8003`.
 
-The consequence for control is concrete: on `0ACUM10` there is **no `_FSL` object to write**, so the
-DSDT-declared floor route does not exist there and only the SMC path can be used — which is the path this
-module already takes. And what the 2071 calls do *not* establish is that any fan value was written: the
-payload is constant across all of them, which is a poll, not a set.
+## The EC's own fan code is readable, and it explains the measurements
+
+The EC capsule has been recovered to source and rebuilt byte-identically
+(`christopherowen/spark-open-firmware`, `ec/ecfw/src/thermal/thermalmgmt.c`). Its constants:
+
+| constant | value |
+| --- | --- |
+| running duty range | 14 – 100 percent |
+| slew | rises at most 10 per pass, falls by one, settled within 2 percent |
+| publish threshold | 5 percent change |
+| CPU fan | 1260 – 9000 rpm |
+| rear fan | 1890 – 13500 rpm |
+| absent host clamp | `0xFFFF` |
+
+`thermal_update_fan_rpm()` computes the published speed from the duty —
+`rpm = (duty-14)/(100-14)*(max-min) + min` — and publishes 0 below duty 14, on a zero tachometer, or on a
+wrapping estimate. The tachometer never supplies the published value.
+
+That accounts for four things this record measured and could not explain:
+
+- a first read after a gap answers 0 and the next carries an rpm — the value is whatever the EC's last
+  pass published under a 5 percent filter;
+- a host floor stays pinned until reboot — nothing in this code clears a clamp;
+- a 13500 rpm request produced 8820/12420 — 13500 is `FAN_REAR_MAX_RPM`, and both numbers are estimates at
+  the resulting duty;
+- the ACPI `_FSL` scale (975…4350) is not the EC's scale (1260…9000, 1890…13500), so the two sides of the
+  interface never agreed.
+
+A published `_FST` value is therefore an estimate, not a measurement, and must not be presented as one.
 

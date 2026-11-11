@@ -146,13 +146,39 @@
           "_tmp": 9
         }
       },
-      "firmware_calls_the_fan_service_itself": {
+      "what_the_boot_calls_actually_are": {
         "measured_in": "firmware/runs/20261111T122225.531884Z, --firmware-version 4.1.0 --flash-trace",
-        "smc": "0xC400008D with x1 = 0x8003 and x2 = 0x20418532a0634a88",
-        "count": 2071,
-        "meaning": "the image's own code drives the fan/EC endpoint during boot, before any OS runs, so the interface is live in that firmware even though its DSDT does not describe it"
+        "call": "SMC 0xC400008D with x1 = 0x8003 and x2 = 0x20418532a0634a88, 2071 times",
+        "correction": "0xC400008D is FFA_MSG_SEND_DIRECT_REQ2, not a fan service id. Endpoint 0x8003 is SPARK_FIRMWARE_PARTITION_ID and the constant payload is the low half of service UUID 884a63a0-3285-4120-83aa-eec008a0a546, the firmware-inventory service: command 12 reads the EC version at 0x06000760 and the PD versions at 0x06000770/0x06000774.",
+        "so": "those calls are EC-version reads by FmpEndOfDxe/SmbiosType45Dxe, not fan control. An earlier version of this record read the constant as a fan poll and inferred a fan path from it; that inference is withdrawn. Whether the ASUS image's fan path is live is an open question and it is not answered at 0x8003.",
+        "source": "christopherowen/spark-open-firmware, soc/uefi/include/FirmwareInventoryLayout.h"
+      }
+    },
+    "ec_source": {
+      "what": "the EC capsule (0x3000508, app 3.5.8) recovered to source by christopherowen/spark-open-firmware, rebuilt byte-identical, so the fan controller is readable C",
+      "file": "ec/ecfw/src/thermal/thermalmgmt.c",
+      "constants": {
+        "fan_duty_min": 14,
+        "fan_duty_max": 100,
+        "fan_duty_step_up": 10,
+        "publish_threshold_percent": 5.0,
+        "cpu_rpm_range": [
+          1260,
+          9000
+        ],
+        "rear_rpm_range": [
+          1890,
+          13500
+        ],
+        "absent_host_clamp": "0xFFFF"
       },
-      "what_it_proves_and_what_it_does_not": "It proves the transport path exists and is used by that firmware. It does not prove any value was written to the fans, and it says nothing about an ACPI floor: 4.1.0's DSDT carries no FAN0, no _FSL/_FST and no WFCF, exactly like 0ACUM027, so a _FSL-based control has no object to write on this firmware and only the SMC path can be used."
+      "published_speed_is_an_estimate": "thermal_update_fan_rpm computes rpm = (duty-14)/(100-14)*(max-min)+min and publishes 0 below duty 14, on a zero tach, or on a wrapping estimate; the tachometer never supplies the published value",
+      "explains": [
+        "a first read after a gap answers 0 and the next carries an rpm: the value is whatever the EC's last pass published under a 5 percent filter",
+        "a host floor stays pinned until reboot: nothing in this code clears a clamp",
+        "a 13500 rpm request produced 8820/12420: 13500 is FAN_REAR_MAX_RPM and both numbers are estimates at the resulting duty",
+        "the ACPI _FSL scale (975..4350) is not the EC's scale (1260..9000 / 1890..13500), so the two sides of the interface never agreed"
+      ]
     }
   }
 }
