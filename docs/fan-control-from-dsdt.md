@@ -327,6 +327,12 @@ ACUM027 unit:
 - **the transport carries the rpm itself.** The write commands `0x06000790..0x06000793` take two
   little-endian bytes of rpm, so a floor above the `_FSL` scale can be requested directly: `13500` was
   written and the service then reported **8820/12420 rpm**, audibly louder than the other units beside it.
+- **this is the interface the firmware itself uses, not one inferred from behaviour.** The newest DSDT
+  we hold (`ACUM028`) implements `FAN0._FSL` as `WFCF` → `WRB` with `XX0 = 0xC400008D`, `XX1 = 0x8003`,
+  and writes `0x06000790..793` with `RPM = FMIN + ((FMAX - FMIN) * level) / 0x64` where `FMIN = 0x3CF`
+  (975) and `FMAX = 0x10FE` (4350) — the same function id, endpoint, commands and scale this module uses.
+  The older units' ACPI publishes no fan device at all, yet the service answers there, so the interface
+  outlived its own ACPI description rather than the other way round.
 
 Under the same 8-worker load for the same duration, the hottest zone peaked at **61 °C** with firmware
 control, **60 °C** at a 4350 rpm floor and **55 °C** at 12500 — one run per arm, so an observation and not
