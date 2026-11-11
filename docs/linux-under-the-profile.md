@@ -369,3 +369,49 @@ console is **not established** — the two candidates are named so the next prob
 rather than from a guess. The next probe is a run with `nokaslr ignore_loglevel earlycon keep_bootcon`
 and, if it stays silent, monitor-side tracing of the first post-console accesses.
 
+## The installed disk can be inspected from inside the emulator
+
+No host tool here reads ext4 at a partition offset (`debugfs` has no offset option and `fuse2fs` is not
+installed), so the emulator reads its own install: `run_linux.py` now takes `--console-script`,
+`--console-after` and `--console-delay` and types the file's lines into the guest, which with `-nographic`
+arrives on the shell that `usb.shell` starts before `init_mount`. Measured from that shell:
+
+```
+# mount /dev/nvme0n1p2 /mnt/root
+EXT4-fs (nvme0n1p2): mounted filesystem 69909700-2b7b-41a4-a817-5d87b823349f r/w
+# ls /mnt/root/boot
+config-7.0.0-1019-nvidia   initrd.img                    system.map-7.0.0-1019-nvidia
+initrd.img-7.0.0-1019-nvidia   vmlinuz                   vmlinuz-7.0.0-1019-nvidia
+# blkid
+/dev/nvme0n1p1: LABEL="EFI"  UUID="D4C3-27CF"      TYPE="vfat"
+/dev/nvme0n1p2: LABEL="root" UUID="69909700-…349f" TYPE="ext4"
+```
+
+The writer is a background thread that must not close the stream: `Popen.communicate()` flushes it
+afterwards, and closing it made that flush raise `flush of closed file`, which replaced the run's output
+and threw away the capture. `tests/test_linux_boot.ConsoleScriptTests` pins both properties — one line
+typed once, stream left open, and a closed stream treated as the guest exiting rather than an error.
+
+## Boot arguments decide how much the installed kernel can say
+
+The same disk booted with the line the installer wrote stops after `printk: legacy bootconsole [uart0]
+enabled` and says nothing for the rest of an hour. With the ESP's `grub.cfg` replaced by an explicit
+stanza — `keep_bootcon`, `earlycon=uart,mmio32,0x16a00000`, `loglevel=8 ignore_loglevel`, `nokaslr`,
+`console=ttyS0,115200 console=ttyAMA0` — the same kernel now prints past the bootconsole and enumerates
+its own storage:
+
+```
+pci 000f:00:02.0: [1b36:0010] type 00 class 0x010802 PCIe Root Complex Integrated Endpoint
+pci 000f:00:02.0: BAR 0 [mem 0x24000000-0x24003fff 64bit]
+acpi PNP0A08:0b: ECAM at [mem 0x29000000-0x291fffff] for [bus 00-01]
+```
+
+It then reaches `scmi_core: SCMI protocol bus registered` at kernel time 2.54 s and goes quiet — the same
+place the recovery boot reached before it eventually continued, at kernel time ~25 s, to
+`Run /init as init process`. That gap is slow, not stuck (the earlier trace showed the vCPU accumulating
+time in a code loop), which is why the earlier successes used a 3 GiB guest and up to an hour of wall
+time. A 2400-second budget is too short for this machine; the documented allowance is an hour.
+
+The original ESP stanza is preserved as `EFI/ubuntu/grub.cfg.orig` on the disk, so the verbose line is a
+diagnostic that can be reverted from the same shell that wrote it.
+

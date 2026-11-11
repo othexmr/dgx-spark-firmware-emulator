@@ -26,6 +26,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import pathlib
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "firmware" / "downloads" / "recovery-extract"
@@ -94,8 +97,29 @@ def machine_arguments(machine: str) -> list[str]:
     raise ValueError(f"unknown machine: {machine}")
 
 
+def type_script(stream, script: pathlib.Path, after: float, delay: float) -> None:
+    """Type a console script into the guest, one line at a time, after `after` seconds.
+
+    With `-nographic` QEMU's serial is stdio, so a line written to the child's stdin is a line the
+    guest receives. The delay matters: the guest's UART FIFO is small and TCG is slow, so the lines
+    must not arrive faster than the shell can drain them.
+    """
+    time.sleep(after)
+    for line in script.read_text().splitlines():
+        try:
+            stream.write((line + "\n").encode())
+            stream.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            # The guest exited or the reader closed while we were still typing: that is the
+            # run's outcome to judge, not an error to raise from a background thread.
+            return
+        time.sleep(delay)
+    # The stream is deliberately left open: Popen.communicate() flushes and closes it, and closing
+    # it here makes that flush raise "flush of closed file" instead of returning the run's output.
+
+
 def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeout=120, disk=None,
-        usb_image=None, target=None):
+        usb_image=None, target=None, console_script=None, console_after=0.0, console_delay=0.5):
     qemu = shutil.which(qemu) or qemu
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     directory = local_path(ROOT / "firmware" / "runs" / f"linux-{stamp}")
@@ -116,23 +140,39 @@ def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeou
                     "-drive", f"if=none,id=media0,file={usb_image},format=raw,snapshot=on",
                     "-device", "scsi-hd,drive=media0,bus=media.0,serial=SPARKKEY"]
     # init_mount partitions /dev/nvme0n1 by name, so the install target has to be an nvme device.
+    # No snapshot here: the installer writes the root image into this disk, and a boot of the
+    # result is the only proof the install finished. The media keeps its snapshot because a run
+    # must never modify the payload it was given.
     if target is not None:
         target = local_path(target)
-        command += ["-drive", f"if=none,id=target,file={target},format=raw,snapshot=on",
+        command += ["-drive", f"if=none,id=target,file={target},format=raw",
                     "-device", "nvme,drive=target,serial=SPARKTGT"]
     record = {"machine": machine, "memory": memory, "smp": smp, "timeout": timeout,
               "append": append, "kernel_sha256": hashlib.sha256(Path(kernel).read_bytes()).hexdigest(),
               "initrd_sha256": hashlib.sha256(Path(initrd).read_bytes()).hexdigest(),
               "qemu_sha256": hashlib.sha256(Path(str(qemu)).read_bytes()).hexdigest(),
               "command": command}
+    if target is not None:
+        record["target"] = {"path": str(target), "size": target.stat().st_size,
+                            "write_policy": "written by the guest: the install lands here"}
     if usb_image is not None:
         record["usb_image"] = {"path": str(usb_image),
                                "sha256": hashlib.sha256(usb_image.read_bytes()).hexdigest(),
                                "write_policy": "snapshot; the source image is never written"}
     log = local_path(directory / "console.log")
+    typing = None
     with log.open("wb") as capture:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if console_script else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if console_script:
+            record["console_script"] = {"path": str(console_script), "typed_after": console_after,
+                                        "lines": len(console_script.read_text().splitlines())}
+            typing = threading.Thread(target=type_script,
+                                      args=(process.stdin, console_script, console_after,
+                                            console_delay), daemon=True)
+            typing.start()
         try:
             process.wait(timeout=timeout)
             timed_out = False
@@ -178,6 +218,12 @@ def main() -> int:
     parser.add_argument("--smp", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--disk", type=Path, help="an image to attach as virtio-blk")
+    parser.add_argument("--console-script", type=Path,
+                        help="type this file's lines into the guest console, one line per Enter")
+    parser.add_argument("--console-after", type=float, default=0.0,
+                        help="seconds to wait before typing the console script")
+    parser.add_argument("--console-delay", type=float, default=0.5,
+                        help="seconds between typed lines; the guest UART is small and TCG is slow")
     parser.add_argument("--target", type=Path,
                         help="the install target: init_mount partitions /dev/nvme0n1 by name")
     parser.add_argument("--usb-image", type=Path,
@@ -193,7 +239,8 @@ def main() -> int:
             kernel, initrd = args.kernel, args.initrd
         kernel = gunzip_image(kernel)
         directory = run(args.qemu, kernel, initrd, args.append, args.machine, args.memory,
-                        args.smp, args.timeout, args.disk, args.usb_image, args.target)
+                        args.smp, args.timeout, args.disk, args.usb_image, args.target,
+                        args.console_script, args.console_after, args.console_delay)
         print(directory)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
