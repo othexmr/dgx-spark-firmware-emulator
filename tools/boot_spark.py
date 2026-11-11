@@ -189,6 +189,21 @@ def nvme_arguments(images, path_for=local_path):
     return arguments, entries
 
 
+def die_with_parent():
+    """Have the child take SIGKILL when this process dies.
+
+    A boot that is killed -- by a job runner, by a timeout, by hand -- otherwise leaves QEMU running:
+    it keeps the state file locked, so every later launch fails with `[Errno 11]` from the lock and
+    silently reports nothing, and it keeps burning a core while the serial logs it writes belong to a
+    run nobody is watching any more.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, 9, 0, 0, 0)  # PR_SET_PDEATHSIG, SIGKILL
+    except (OSError, AttributeError):
+        pass
+
 def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=None, pxe_image=None,
         pxe_marker=None, rtc_base=None, seed=None, firmware_version=DEFAULT_VERSION,
         memory=None, smp=None, nor_size=NOR_STATE_SIZE, gdb_port=None,
@@ -196,7 +211,8 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
         accept_mmap_notify=False, gwdt_timeout_ms=None, stop_after_boots=None,
         program_model=None, code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
         extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-        console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False):
+        console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False,
+        no_setup_escape=False):
     qemu = shutil.which(qemu)
     if qemu is None:
         raise ValueError("build the Spark QEMU profile first: python3 tools/build_qemu.py")
@@ -276,7 +292,7 @@ def run(qemu, mode, timeout, state_path, policy="armed", write_us=0, erase_us=No
                           stop_after_boots=stop_after_boots, program_model=program_model,
                           code_offset_source=code_offset_source, qmp_path=qmp_path,
                           console_script=console_script, console_after=console_after,
-                          rot_functional=rot_functional,
+                          rot_functional=rot_functional, no_setup_escape=no_setup_escape,
                           console_delay=console_delay, usb_image=usb_image,
                           trace_pc=trace_pc, trace_limit=trace_limit, trace_sample=trace_sample, extended_ram=extended_ram,
                           nvme_images=nvme_images,
@@ -292,7 +308,8 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                allow_marker_only=False, firmware_path=None, program_model=None,
                code_offset_source="not-sliced", trace_pc=None, trace_limit=0, trace_sample=0,
                extended_ram=False, nvme_images=None, qmp_path=None, console_script=None,
-               console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False):
+               console_after=0.0, console_delay=0.03, usb_image=None, rot_functional=False,
+               no_setup_escape=False):
     firmware_directory = prepared_directory(firmware_version)
     if firmware_path is None:
         firmware_path = firmware_directory / "uefi.fd"
@@ -458,6 +475,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
         try:
             process = resources.enter_context(subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    preexec_fn=die_with_parent,
                 stderr=subprocess.STDOUT, bufsize=0))
             qmp = resources.enter_context(Qmp(connect_unix(
                 Path(qmp_path) if qmp_path else Path(temporary) / "qmp", process)))
@@ -569,7 +587,7 @@ def run_locked(qemu, monitor, package, directory, handoff, state, before, mode, 
                         # ESC is "enter Setup" on this firmware, so sending it dismisses nothing:
                         # it diverts a disk boot into the setup UI. --no-setup-escape exists to
                         # separate our own keypress from the firmware's behaviour.
-                        if (not args.no_setup_escape and mode is not RunMode.PXE_TEST
+                        if (not no_setup_escape and mode is not RunMode.PXE_TEST
                                 and not escape_sent and b"Press <DEL>" in capture):
                             process.stdin.write(b"\x1b")
                             escape_sent = True
@@ -1208,6 +1226,7 @@ def main():
                         nvme_images=args.nvme_image, qmp_path=args.qmp_alive,
                         console_script=args.console_script, console_after=args.console_after,
                         rot_functional=args.rot_functional,
+                        no_setup_escape=args.no_setup_escape,
                         usb_image=args.usb_image,
                         accept_mmap_notify=args.accept_mmap_notify,
                         gwdt_timeout_ms=args.gwdt_timeout_ms,

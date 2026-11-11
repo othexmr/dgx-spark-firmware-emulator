@@ -98,6 +98,21 @@ def machine_arguments(machine: str) -> list[str]:
     raise ValueError(f"unknown machine: {machine}")
 
 
+def die_with_parent():
+    """Have the child take SIGKILL when this process dies.
+
+    A boot that is killed -- by a job runner, by a timeout, by hand -- otherwise leaves QEMU running:
+    it keeps the state file locked, so every later launch fails with `[Errno 11]` from the lock and
+    silently reports nothing, and it keeps burning a core while the serial logs it writes belong to a
+    run nobody is watching any more.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, 9, 0, 0, 0)  # PR_SET_PDEATHSIG, SIGKILL
+    except (OSError, AttributeError):
+        pass
+
 def type_script(stream, script: pathlib.Path, after: float, delay: float) -> None:
     """Type a console script into the guest, one line at a time, after `after` seconds.
 
@@ -172,6 +187,7 @@ def run(qemu, kernel, initrd, append, machine="virt", memory="2G", smp=2, timeou
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE if console_script else subprocess.DEVNULL,
+                preexec_fn=die_with_parent,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if console_script:
             record["console_script"] = {"path": str(console_script), "typed_after": console_after,
