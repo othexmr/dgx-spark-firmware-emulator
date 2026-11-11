@@ -1,0 +1,79 @@
+# The EFI runtime variable service
+
+Why `efibootmgr` and `efivars` fail on this profile, what already works, and the order in which the
+remainder can be implemented without guessing.
+
+## The chain, and which links are measured
+
+```
+Linux efivars / efibootmgr
+  → firmware runtime GetVariable / SetVariable in EFI runtime memory
+    → MM communication buffer at 0x933e0000 (128 KiB), FF-A direct request to endpoint 0x8004
+      → STMM, running as a secure image this monitor boots ("MON: boot STMM" in every run)
+        → the flash service at endpoint 0x8002, which this monitor serves
+          → the variable partition of the NOR model (32 MiB at flash 0x03000000)
+```
+
+| link | state |
+| --- | --- |
+| firmware runtime → `0x8004` | **measured**: `monitor.c` saves the non-secure context and enters the secure one with the frame (`DIRECT_REQ`, NS, endpoint `0x8004`) |
+| STMM running | **measured**: it reports `MON: STMM waiting` and answers `DIRECT_RESP` at level 2 |
+| STMM → flash service `0x8002` | **measured**: the monitor serves reads, program and erase through the same model the flash lane uses, with the latch policy at `0x1e3a4` |
+| the variable store itself | **modelled**: 32 MiB variable partition, seeded, with a live overlay |
+| ROT services `0x12`, `0x29` | **refused**: the opt-in `spark-rot-error-replies` transport answers status `1` (unavailable) to every request |
+
+So the transport and the store exist. What is missing is the secure world's *cryptographic* dependency:
+STMM asks the ROT for two services and gets a refusal.
+
+## Why the refusal is not simply "return success"
+
+Two facts from earlier work close that shortcut:
+
+- Answering the `0x8004` pair with flash semantics — the obvious one-line fix — makes the firmware take
+  a synchronous exception immediately (`Synchronous Exception at 0x0000000084…`). Endpoint `0x8004` is a
+  different service with a different protocol, not the flash service renumbered.
+- The `spark-rot-error-replies` transport exists to prove a *failure* scenario. Its own test asserts it
+  never returns service success (`tests/test_qemu_profile.py`,
+  `test_rot_failure_transport_never_returns_service_success`), and the comment in the model says it
+  "must never be presented as a successful security service". Answering `0` there would be a lie about
+  authentication, not an implementation.
+
+## What is implemented now
+
+The transport records the **whole** refused request, not just its service id:
+
+```
+spark ROT: service 0x29 refused; request[2] = 0x00000129 0x…
+```
+
+That is the only sound starting point: a service implemented from its own refused requests is
+reconstructed from evidence, while a service implemented from a guess about what a ROT "probably" does
+is how the firmware was crashed before.
+
+## Order of work
+
+1. **Capture both services.** Run the firmware boot with the model's log enabled and record every
+   `service 0x12` and `service 0x29` request with its full payload: which words are constants, which
+   are addresses, which change between boots, and what the caller does with the reply it gets back.
+   Two runs are the minimum, because one run cannot distinguish a constant from a value that happened
+   to be constant.
+2. **Name the request shape.** From the payload and the caller's subsequent behaviour, write down the
+   request and reply layout before implementing anything. If the shape cannot be named from two
+   captures, capture more — do not interpolate.
+3. **Implement only what the capture shows**, one service at a time, each with a probe that exercises
+   the exchange through the transport rather than asserting on source text. `0x29` is the smaller
+   request (one payload word observed) and is the first one to attempt.
+4. **Then remove `efi=noruntime` from the profile command line** and assert the milestone that has never
+   held: the guest mounts `efivars` and `efibootmgr` lists and creates an entry. Until that asserts, the
+   profile keeps the flag and the limitation is stated rather than papered over — which is what
+   `docs/linux-under-the-profile.md` already records.
+5. **Re-run the installer** afterwards: its last failing step is `efibootmgr --create`, so a working
+   variable service should turn `Error: Failed to find the newly created Ubuntu entry` into a success,
+   and that is a far better proof than any unit test.
+
+## What this will not do
+
+It will not make the profile authenticate anything. A ROT service that returns a well-formed answer to
+a firmware caller is a functional model, not a security boundary, and nothing here should be described
+as secure boot or measured boot. The value is that the firmware's own code paths stop failing for want
+of an answer, which is what a fidelity emulator is for.
