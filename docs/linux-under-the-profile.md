@@ -974,14 +974,11 @@ present before loading the fan module; taint bits are sticky within a boot.
 `4096 → 12288` and module `OE` are the faithful result, not a reason to
 suppress verification or clear taint.
 
-The untested path to removing `E` requires owner-approved platform key
-provisioning, Secure Boot enabled, a verified shim/GRUB/kernel chain, and
-the enrolled MOK accepted by the kernel's MOK trust/keyring path before
-module verification. None of those prerequisites was bypassed or claimed.
-Enabling Secure Boot would change the lab's intentional security posture
-and is not part of this fan experiment. Even then, `O` would remain.
-The signing/enrollment path and expected Secure-Boot-off behaviour are
-closed evidence; Secure-Boot-on verification remains untested.
+Those runs deliberately stopped short of platform provisioning. The
+owner-approved Secure-Boot-on follow-on below uses a separate NOR state,
+the same enrolled MOK and signed module, and the unchanged boot binaries.
+It does not reinterpret the historical **4096 → 12288** result: that is
+still the expected result when reproducing the Secure-Boot-off runs.
 
 Final checks for the follow-on changes, with no guest running:
 `python3 -m unittest discover -s tests -q` reports **413 tests, 51 skipped,
@@ -991,4 +988,107 @@ OK** (exit 0); `python3 tools/check_publication.py` reports
 `publication-check.log` and `fan-gap-evidence.json`. Monitor integration
 tests were not rerun for this follow-on; the 51 skipped cases are not
 claimed as exercised.
+
+## Lab platform Secure Boot provisioning
+
+The owner-approved follow-on retains two independent, ignored NOR stores:
+
+| State | Local path | Meaning |
+| --- | --- | --- |
+| Secure Boot off | `firmware/state/spark-secureboot-off.bin` | Byte-for-byte copy of `spark-mok-enroll.bin` before provisioning; SHA-256 `f137c0e4e0a0577b5ac42d055c9b84b925e1c4fb4c04ce251fbddd97322caa19` |
+| Secure Boot on | `firmware/state/spark-secureboot-on.bin` | Independently enrolled PK, KEK and db, with the existing shim MOK enrollment retained |
+
+These are the **1 MiB legacy variable-store inputs** used by the preceding
+installed-guest experiments, not a manufacturer's complete 64 MiB flash
+part. The original `spark-mok-enroll.bin` is also retained. Select the off
+copy explicitly when reproducing earlier results; do not reuse the on
+store and assume its security policy is unchanged.
+
+### Exactly which certificates were supplied
+
+All hashes below are SHA-256 of the public DER certificate, not the
+certificate's public-key identifier or an EFI signature-list hash.
+
+| Trust location | Certificate and source | Purpose |
+| --- | --- | --- |
+| PK | `DGX Spark emulator lab PK`; newly generated self-signed RSA-2048/SHA-256 lab certificate, `216b025e3a83048b8ccdd0bf27d2e6771990a27acb4edcdf6ee6971a47ffcd2b` | Lab platform owner; authorizes PK/KEK variable updates |
+| KEK | `DGX Spark emulator lab KEK`; a separate newly generated self-signed RSA-2048/SHA-256 lab certificate, `92074826cb9b9c32ad525340bb29bcbb13776660ce3ba11354c4c74e04d74ff7` | Authorizes image-allowlist updates; the KEK variable update was signed with the lab PK |
+| db | **Only** `Microsoft Corporation UEFI CA 2011`, `48e99b991f57fc52f76149599bff0a58c47154229b9f8d603ac40d3500248507` | Authenticates the ESP's Microsoft-signed shim; extracted unchanged from that shim's embedded Authenticode certificate chain, not generated or re-signed locally |
+| Shim's embedded vendor trust, **not db** | `Canonical Ltd. Master Certificate Authority`, `ed1fe72cb9ca31c9af5b757afcd733323d675825032e6ced7fe1ae9eb767998c`; already embedded in the unchanged Ubuntu shim | Authenticates the Canonical-signed GRUB and Ubuntu kernel chain |
+| Shim MOK enrollment | Existing `DGX Spark emulator lab signing`, `cedb731b602b0255812ed03afa18f0d2d50e90bf56b72b0c758a0362328b6013` | Authenticates the already-signed, out-of-tree lab fan module; this is neither PK nor KEK nor a new db entry |
+
+The X.509 PK and KEK certificates are independently self-signed.
+The **authenticated variable updates**, rather than an invented X.509
+issuer chain between those certificates, establish the UEFI hierarchy.
+The lab PK/KEK private keys remain in the ignored, mode-0600 local
+`firmware/state/secureboot-lab/` directory. They are not production keys
+and are never committed. The earlier module-signing private key was not
+recovered or regenerated.
+
+The actual ESP shim (`EFI/BOOT/BOOTAA64.EFI`, identical to
+`EFI/ubuntu/shimaa64.efi`) has SHA-256
+`706f15b9578f780a2fddda8ee0806cd15b59124692cc297db320414a5a40fe44`.
+Its leaf is `Microsoft Windows UEFI Driver Publisher`, issued by the
+Microsoft UEFI CA above. **GRUB is not Microsoft-signed**:
+`EFI/ubuntu/grubaa64.efi`, SHA-256
+`b9d9dd81845d68a1f1867b5bcf26393908a9a349e749ce8ea944a1066d9abfcc`,
+is signed by `Canonical Ltd. Secure Boot Signing (2022 v1)`, issued by the
+Canonical Master CA. Host `sbverify --list` identified both chains;
+`sbverify --cert` with the corresponding public PEM CA reported
+`Signature verification OK` for each image. No Canonical certificate was
+added to db to make a failing GRUB pass.
+
+### Provisioning path and custody
+
+Retained run **`20261112T015108.967843Z`** provisioned through the unchanged
+firmware's actual runtime `SetVariable` service, using guest efivarfs.
+The guest started in `SetupMode=1`. Each certificate was wrapped in a
+standard `EFI_CERT_X509_GUID` signature list, owner GUID
+`604dab50-e046-4300-abb6-3dd810dd8b23`. Updates used attributes `0x27`
+(nonvolatile, boot-service, runtime, time-based authenticated write).
+The signed content was the UTF-16LE variable name without its terminator,
+vendor GUID, attributes, EFI timestamp and signature list. OpenSSL CMS
+produced detached binary SHA-256 PKCS#7 signatures with no signed
+attributes; an `EFI_VARIABLE_AUTHENTICATION_2` header carried each
+signature and timestamp.
+
+Enrollment order was **db signed by KEK → KEK signed by PK → PK signed by
+itself**, installing PK last while the firmware was in Setup Mode.
+The guest refused to replace an existing key variable and read the
+resulting variables back through efivarfs. The capture records:
+
+```text
+SETUP_MODE_BEFORE=01
+ENROLLED_db_BYTES=2881
+db_ATTRIBUTES=0x27
+db_ESL_SHA256=79bba62f0edc0c0fb6fe7d8476d5a598a7d45c4e391ce213d15e8e265ce2e8d1
+ENROLLED_KEK_BYTES=2139
+KEK_ATTRIBUTES=0x27
+KEK_ESL_SHA256=648c8c8311d721d83e921ddbac567ddd71c64fec08b9f22ea9efb1e9e134b6de
+ENROLLED_PK_BYTES=2137
+PK_ATTRIBUTES=0x27
+PK_ESL_SHA256=b2c74af813fde95aa25610ecaae78aabc060a163c83a2534a885d900c435cb6e
+SetupMode=0600000000
+SecureBoot=0600000000
+ENROLL_RC=0
+```
+
+The first four bytes of those final two values are efivarfs attributes
+`0x6`; their data byte is zero. Installing PK leaves Setup Mode
+immediately, but Secure Boot becomes effective on the **next cold boot**.
+The existing `SecureBootSetup` policy already requested enablement; no
+read-only `SecureBoot` value was forged and no NOR variable was
+hand-edited. Stopping the harness saved the live firmware-written store.
+The vendor UEFI/STMM, shim, GRUB, kernel, monitor and QEMU were not patched
+for this enrollment.
+
+For authenticated lab access, the isolated installed disk's current
+`/etc/shadow` was preserved as mode-0600
+`firmware/state/fan-lab/shadow.pre-sb` alongside the original/test copies,
+then only its root password hash was replaced with a fresh
+`openssl passwd -6` hash. Failed serial-login timing attempts used a
+credential that was subsequently rotated; the later credential is not
+stored in retained artifacts or published. No host credential was
+changed. This remains a disposable disk: restore its original shadow or
+regenerate it before non-lab use.
 
