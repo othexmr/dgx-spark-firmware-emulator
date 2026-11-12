@@ -1261,6 +1261,25 @@ Secure-Boot-off `OE` logs remain valid; the new result changes the
 selection on 2.158.15, physical-unit module policy, and fan-model
 limitations are not revalidated or generalized by this 2.155.11 run.
 
+### Secure Boot provenance boundary
+
+The keys we control are the newly generated, separate **lab PK and lab KEK**
+and the pre-existing **lab module-signing MOK**. Their public-certificate
+hashes and distinct roles are in
+[the certificate inventory](#exactly-which-certificates-were-supplied).
+The Microsoft and Canonical CAs are unchanged third-party certificates,
+not locally generated keys: **db contains only Microsoft Corporation UEFI
+CA 2011**; Canonical trust is embedded in shim, and the MOK remains a shim
+enrollment rather than a db entry.
+
+Retained `20261112T022953.618760Z/serial.log` records
+`DBX_PRESENT=False`, alongside the PK/KEK/db readback and Secure Boot
+enablement. There is **no dbx**, so the image-signature checks do not
+demonstrate current revocation coverage. The vendor firmware itself is
+**not authenticated by the synthetic loader or functional ROT**; its
+original-image hashes are provenance checks, not a modelled hardware
+root of trust.
+
 This is **not a manufacturer's provisioned Spark root of trust**. The
 owner supplied both lab PK and lab KEK and manually installed the
 authentic Microsoft image CA. A manufacturer's platform-owner PK,

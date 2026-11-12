@@ -16,6 +16,11 @@ discovered once on the profile's `max` CPU (which supplies MMFR3); the secure
 state is restored without disabling the normal world's features.
 The runner disables SVE, SME and pointer authentication; this context
 implementation does not support those extensions or concurrent world switches.
+The permission-state regression does not cover GCS (GCSCR/GCSCRE0/GCSPR),
+fine-grained trap registers, SCTLR2 or every optional timer/debug/PMU group;
+their independent preservation remains unverified. SCR access enables are
+not evidence of saved context. See the
+[remaining platform boundaries](../docs/boot-status.md#remaining-platform-limits-and-evidence-boundaries).
 
 Supported FF-A operations are the pinned image's version/identity discovery,
 one-page RX/TX mapping, MM partition discovery/release, direct MM requests,

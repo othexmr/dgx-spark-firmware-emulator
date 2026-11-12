@@ -325,3 +325,106 @@ This is not manufacturer provisioning: PK/KEK are disposable lab keys,
 the actual unit's key inventory was not copied, dbx is absent, and the
 synthetic loader/functional ROT does not authenticate the vendor firmware.
 
+
+## Remaining platform limits and evidence boundaries
+
+These are separate from the permission-indirection correction and from a
+successful installed-Linux boot.
+
+### ROT request capture is not a reconstructed security service
+
+The captured `0x29` request is `0x00000129 0x90000000`; `0x12` is
+`0x00000312 0x90000000 0x00000001 0xfcc40d97`, followed by the same request
+with `0xb6db6764` as its last word. The leading count interpretation and a
+checksum/digest interpretation of the varying word are **[INFERENCE]**.
+`--rot-functional` supplies status 0 and no payload. The only established
+reply property is **"status 0 is accepted"** on the observed boot path;
+the complete reply shape and security semantics remain **unverified**.
+Paired hardware ROT request/reply and pointed-memory captures, plus the
+caller's post-reply loads/branches (or an authoritative specification),
+would settle this. See [the raw shape and closure requirements](runtime-variables.md#the-request-shape-as-far-as-the-captures-support-it).
+
+Retained `20261111T093421.135412Z/qemu.log` lines 40–41 and 106–117
+contain the transport capture (host diagnostics, **not UART lines**);
+additional `0x12` calls use third word `2` and last word `0x64a0ea5f`.
+The short examples above are not an exhaustive per-boot call count.
+
+### Optional context is not covered by the permission-state regression
+
+The fix and executable regression cover TCR2, stage-1 PIR/PIRE0 and HCRX,
+with normal-world permission state preserved over secure round trips.
+They do **not** establish preservation of guarded-control-stack state
+(`GCSCR`, `GCSCRE0`, `GCSPR`), fine-grained trap registers, `SCTLR2`, or
+every optional timer/debug/PMU context group. Those groups have not been
+independently exercised or exhaustively audited: **unverified**, not
+silently supported. Enabling accesses in `SCR_EL3` is not context
+preservation. SVE, SME and pointer authentication are explicitly disabled
+by the runner, not implemented by this monitor. This is a single-CPU,
+non-concurrent world-switch model, not production isolation.
+
+### Three declared SMMUs, not three modelled SMMUs
+
+The IORT record, [research/smmu-iort.json](../research/smmu-iort.json),
+declares three 128 KiB windows: `0x13800000`, `0x13000000` and
+`0x14900000`. It supplies neither a PCI root-complex node nor PCI stream-ID
+mappings. The profile backs the windows with an inert, read-zero/write-drop
+region; the guest discovers the declarations but no functional SMMU.
+
+The earlier phrase "three attempts, each a build and a start" overstated
+the retained evidence. There are **two recorded QEMU refusals and a
+source-level structural argument**, not three independently retained
+failure diagnostics:
+
+1. No primary PCI bus: `SMMU is not attached to any PCI bus!`.
+2. Attach all three to the same primary bus: the second refuses with
+   `An iommu is already attached to this bus`.
+3. Source review, **not a third measured failure**:
+   `hw/arm/smmu-common.c:smmu_base_realize()` requires PCI attachment and
+   `hw/pci/pci.c:pci_setup_iommu_per_bus()` rejects a second per-bus IOMMU.
+   These diagnostics are recorded in the research record and confirmed
+   in the local QEMU source; their original startup logs are not retained
+   with a named run here. Any distinct third startup diagnostic is
+   **unverified**.
+
+Thus this QEMU `arm-smmuv3` cannot represent the three instances as the
+firmware declares them **without PCI attachment**. Inventing buses or
+stream mappings would change the platform contract. A standalone SMMU
+model, or measured device/stream mappings and a corresponding platform
+description, would be needed to remove the limitation. Guest-side probe
+failures are distinct evidence from these host startup refusals.
+
+The separate guest measurement in retained
+`20261112T060832.086295Z/serial.log` reports all three probe failures
+(ANSI stripped):
+
+```text
+[    2.535931] arm-smmu-v3 arm-smmu-v3.0.auto: no translation support!
+[    2.541182] arm-smmu-v3 arm-smmu-v3.1.auto: no translation support!
+[    2.542548] arm-smmu-v3 arm-smmu-v3.2.auto: no translation support!
+```
+
+### eSPI is not reached
+
+The capsule contains a plaintext `eSPI Service` with a manifest and
+controller window, but the runner boots only UEFI and STMM; no exercised
+boot path reaches that service or the eSPI controller transaction path.
+The FF-A EC fan model is a service-level model, **not eSPI bus emulation**.
+The evidence and explicit `service_not_booted` /
+`transaction_contract_uncharacterised` blockers are in
+[research/espi.json](../research/espi.json).
+Wire transactions, completion/error forms and physical eSPI behaviour
+remain **unverified**. Booting the extracted ESPI service and capturing
+its transactions would be required before implementing that contract.
+
+### Secure Boot provenance is a separate boundary
+
+The PK and KEK are our disposable lab keys; the enrolled module MOK is
+also a lab identity. `db` contains **only Microsoft Corporation UEFI CA
+2011**, not the Canonical CA or that MOK. Canonical trust comes from the
+unchanged shim's embedded vendor certificate. `dbx` is absent. The
+synthetic loader and functional ROT **do not authenticate the vendor
+firmware**. These are genuine UEFI/shim/kernel checks after entry into
+unverified-by-the-model firmware, not a manufacturer's provisioned boot
+ROM/BL31 root of trust. Certificate hashes, guest readback and the
+`DBX_PRESENT=False` capture are linked from the
+[Secure Boot provenance boundary](linux-under-the-profile.md#secure-boot-provenance-boundary).
