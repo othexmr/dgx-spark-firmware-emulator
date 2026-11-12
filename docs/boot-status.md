@@ -47,7 +47,7 @@ capsule PKCS#7 trust chain or establish authenticated boot.
 | Installed Linux from the installer-produced NVMe image | Kernel `7.0.0-1019-nvidia`, 4 KiB pages; default `graphical.target` transaction reaches `multi-user.target` and serial login with no `systemd.unit=` override (2.158.15) |
 | External fan module via FF-A packet model | Explicit lab identity variant loads; CLI state `0 -> 3 -> 0` reads back, with model-computed RPM `1260/1890 -> 4500/4500 -> 1260/1890` (2.155.11; no native ACPI fan declared) |
 | External fan module via native ACPI | Lab identity variant selects already-bound `acpi-fan` for both `PNP0C0B` devices, follows their thermal cooling links, and registers no packet floor device; CLI correctly fails because that device is absent (2.158.15) |
-| Module signing and shim MOK enrollment | Signed lab module reports `DGX Spark emulator lab signing`; interactive consent survives cold boot. Secure Boot is intentionally off, so MOK is not kernel-trusted and `E` correctly remains; out-of-tree `O` also remains |
+| Module signing and shim MOK enrollment | Shim consent survives cold boot. The Secure-Boot-off store reproduces `4096 → 12288 (OE)`; separately provisioned lab PK/KEK/db enable Secure Boot and kernel MOK trust, with the same signed fan module loading at `4096 → 4096 (O)` |
 | GPU and physical NIC firmware | Not part of this result |
 
 The 13 protocols are Security, Cpu, Metronome, Timer, Bds, WatchdogTimer,
@@ -97,9 +97,10 @@ NOR store and a subsequent cold boot are supported.
 QEMU libslirp provides a restricted local test network. Its dedicated TFTP
 directory contains only the generated original probe; vendor images, state,
 objects and logs are never served. The PCAP remains in the ignored run folder.
-This establishes IPv4 PXE and EFI application execution. IPv6 PXE, HTTP boot,
-Secure Boot image acceptance and the physical NIC's embedded firmware have
-not been verified. Installed Linux boot is a separate result below.
+This establishes IPv4 PXE and EFI application execution. IPv6 PXE, HTTP boot
+and the physical NIC's embedded firmware have not been verified. Installed
+Linux boot and lab-key Secure Boot image acceptance are separate results below;
+the PXE result does not establish Secure-Boot-on network boot.
 
 ## Model boundaries
 
@@ -112,8 +113,10 @@ The [NS memory-sharing extension](mm-sharing.md) adds a bounded FF-A lifecycle
 without changing STMM's fixed MM communication-buffer checks. A separate
 local probe verifies the unchanged firmware accepts its advertised buffer and
 rejects an outside pointer even after a successful share.
-Root of Trust requests receive explicit nonzero errors; no attestation or
-security/logging service is reported as successful.
+Root of Trust requests receive explicit nonzero errors by default. The
+installed-Linux and Secure Boot runs explicitly use `--rot-functional`,
+whose success replies **authenticate nothing**. No preceding firmware
+authentication, attestation or production root of trust is established.
 
 Only the optional compatibility NIC is connected through the minimal PCIe
 bridge; most roots remain empty. USB PHY register readback and clock
@@ -266,15 +269,41 @@ run **`20261111T201056.330138Z`** reporting
 `/boot/efi/MOK.DER is already enrolled`. The same signed artifact loads and
 performs the packet state round-trip.
 
-`SecureBoot disabled` and `Platform is in Setup Mode` are intentional lab
-conditions. The kernel's Secure Boot/MOK trust gate excludes that enrolled
-key from its trusted keyrings: both `.platform` and `.machine` are empty.
-The observed `TAINT_BEFORE_TRUSTED=4096`,
-`TAINT_AFTER_TRUSTED=12288`, `TRUSTED_MODULE_TAINT=OE` are **expected**:
+`SecureBoot disabled` and `Platform is in Setup Mode` were intentional
+conditions **for those retained runs**. The kernel's Secure Boot/MOK trust
+gate excluded the enrolled key from its trusted keyrings: both `.platform`
+and `.machine` were empty. Their `TAINT_BEFORE_TRUSTED=4096`,
+`TAINT_AFTER_TRUSTED=12288`, `TRUSTED_MODULE_TAINT=OE` remain expected:
 `E` is untrusted signature (8192), `O` is out-of-tree code (4096).
-Signing/enrollment and faithful Secure-Boot-off behaviour are established;
-no taint was hidden or cleared. Platform key provisioning, Secure Boot
-enablement, the shim/GRUB verification chain and Secure-Boot-on module
-trust remain untested, not silently enabled to remove a bit.
-See [commands, artifact hashes and trust prerequisites](linux-under-the-profile.md#signed-module-and-cold-boot-mok-consent-with-secure-boot-off).
+No historical taint was hidden or cleared.
+See [the unchanged Secure-Boot-off evidence](linux-under-the-profile.md#signed-module-and-cold-boot-mok-consent-with-secure-boot-off)
+and [the separately provisioned lab PK/KEK/db](linux-under-the-profile.md#lab-platform-secure-boot-provisioning).
+
+## Platform Secure Boot and trusted module follow-on
+
+Run **`20261112T022953.618760Z`** uses a separately provisioned lab PK/KEK
+and **only Microsoft UEFI CA 2011 in db**. Its `BootCurrent: 0000`
+identifies `EFI/BOOT/BOOTAA64.EFI`; unchanged shim verifies Canonical-signed
+GRUB and kernel. Guest `mokutil` reports `SecureBoot enabled`, efivarfs
+reports SecureBoot 1 / SetupMode 0, and the default transaction reaches
+both multi-user and graphical targets plus authenticated serial login.
+
+The existing lab MOK appears in `.platform`. The unchanged signed fan
+module loads at **4096 → 4096**, module taint **O only**, and completes
+floor `0 → 3 → 0` with sysfs estimates `4500/4500` at state 3 and
+`1260/1890` after automatic restoration. Integrity lockdown is active;
+the unsigned original is actually refused with `Key was rejected by
+service`, leaving taint 4096.
+
+Separate one-byte-corruption controls demonstrate actual rejection by
+firmware, shim and GRUB/shim-lock, rather than relying only on an enable
+flag or on host signature inspection.
+See [the boundary-specific refusal table](linux-under-the-profile.md#independent-negative-controls-for-all-three-image-verification-steps)
+and [the complete positive evidence](linux-under-the-profile.md#cold-boot-chain-and-kernel-trust).
+
+`firmware/state/spark-secureboot-off.bin` preserves the earlier policy;
+`spark-secureboot-on.bin` retains the enrolled policy. Both are local-only.
+This is not manufacturer provisioning: PK/KEK are disposable lab keys,
+the actual unit's key inventory was not copied, dbx is absent, and the
+synthetic loader/functional ROT does not authenticate the vendor firmware.
 
