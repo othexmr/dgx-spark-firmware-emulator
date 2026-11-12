@@ -301,6 +301,24 @@ flag or on host signature inspection.
 See [the boundary-specific refusal table](linux-under-the-profile.md#independent-negative-controls-for-all-three-image-verification-steps)
 and [the complete positive evidence](linux-under-the-profile.md#cold-boot-chain-and-kernel-trust).
 
+Both modes are one flag apart, and either is reproducible with the recorded arguments:
+
+```sh
+# Secure Boot off (the earlier policy; unsigned modules load and taint E)
+python3 tools/boot_spark.py --firmware-version 2.155.11 --memory 2G --timeout 3600 \
+    --state-file firmware/state/spark-secureboot-off.bin \
+    --nvme-image firmware/state/install-target-40g.img \
+    --rot-functional --no-setup-escape --ffa-ec
+
+# Secure Boot on (PK/KEK/db enrolled; signed module only; taint O only)
+python3 tools/boot_spark.py --firmware-version 2.155.11 --memory 2G --timeout 3600 \
+    --state-file firmware/state/spark-secureboot-on.bin \
+    --nvme-image firmware/state/install-target-40g.img \
+    --rot-functional --no-setup-escape --ffa-ec
+```
+
+The two images are separate state files, not a toggle inside one: `--state-file` selects which
+variable store boots, so the Secure-Boot-on run cannot silently fall back to the off policy.
 `firmware/state/spark-secureboot-off.bin` preserves the earlier policy;
 `spark-secureboot-on.bin` retains the enrolled policy. Both are local-only.
 This is not manufacturer provisioning: PK/KEK are disposable lab keys,
