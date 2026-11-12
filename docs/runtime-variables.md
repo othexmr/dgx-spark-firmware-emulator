@@ -1,7 +1,14 @@
 # The EFI runtime variable service
 
-Why `efibootmgr` and `efivars` fail on this profile, what already works, and the order in which the
-remainder can be implemented without guessing.
+The monitor relays runtime variable requests to the real Standalone MM (STMM)
+firmware; it does not implement a second EFI variable database. The earlier
+`Operation not supported` and installer `efibootmgr` failures are historical,
+before the permission-context correction. Runtime writes already succeeded in
+the [Secure Boot enrollment run](linux-under-the-profile.md#provisioning-path-and-custody)
+`20261112T015108.967843Z`, and the following cold boot
+`20261112T022953.618760Z` reports `BootCurrent: 0000` for a guest-created
+`Spark shim fallback` boot entry. Its loader happens to be
+`\EFI\BOOT\BOOTAA64.EFI`; that is not evidence of an unwritable NVRAM store.
 
 ## The chain, and which links are measured
 
@@ -11,7 +18,7 @@ Linux efivars / efibootmgr
     → MM communication buffer at 0x933e0000 (128 KiB), FF-A direct request to endpoint 0x8004
       → STMM, running as a secure image this monitor boots ("MON: boot STMM" in every run)
         → the flash service at endpoint 0x8002, which this monitor serves
-          → the variable partition of the NOR model (32 MiB at flash 0x03000000)
+          → the persistent NOR model at flash offset 0x03000000
 ```
 
 | link | state |
@@ -19,11 +26,15 @@ Linux efivars / efibootmgr
 | firmware runtime → `0x8004` | **measured**: `monitor.c` saves the non-secure context and enters the secure one with the frame (`DIRECT_REQ`, NS, endpoint `0x8004`) |
 | STMM running | **measured**: it reports `MON: STMM waiting` and answers `DIRECT_RESP` at level 2 |
 | STMM → flash service `0x8002` | **measured**: the monitor serves reads, program and erase through the same model the flash lane uses, with the latch policy at `0x1e3a4` |
-| the variable store itself | **modelled**: 32 MiB variable partition, seeded, with a live overlay |
-| ROT services `0x12`, `0x29` | **refused**: the opt-in `spark-rot-error-replies` transport answers status `1` (unavailable) to every request |
+| the variable store itself | **modelled**: seeded NOR with a live overlay; these installed-guest runs use a legacy 1 MiB store, not a complete board flash part |
+| ROT services `0x12`, `0x29` | Default/error transport refuses them; opt-in `--rot-functional` answers status 0 with no payload, allowing the observed firmware path to proceed |
 
-So the transport and the store exist. What is missing is the secure world's *cryptographic* dependency:
-STMM asks the ROT for two services and gets a refusal.
+The transport, real variable implementation and persistent NOR store therefore
+already exist. The measured runtime blocker was unbanked permission-indirection
+state leaking from Linux into STMM, not an absent `0x8004` service. The monitor
+now saves/restores TCR2, PIR/PIRE0 and HCRX per world; see the
+[fault and corrected-context evidence](linux-under-the-profile.md#the-installed-disk-boots-to-the-installed-kernel-under-the-vendor-uefi).
+This does not turn the functional ROT replies into cryptographic services.
 
 ## Why the refusal is not simply "return success"
 
@@ -38,45 +49,29 @@ Two facts from earlier work close that shortcut:
   "must never be presented as a successful security service". Answering `0` there would be a lie about
   authentication, not an implementation.
 
-## What is implemented now
+## What a runtime-variable test must demonstrate
 
-The transport records the **whole** refused request, not just its service id:
+Use the full vendor-UEFI boot runner, with no `efi=noruntime` argument, a
+persistent `--state-file`, `--rot-functional`, and the installed NVMe image.
+The monitor's `--flash-trace` records the direct-request register frame and
+the returned MM-buffer header without replacing STMM's response.
 
-```
-spark ROT: service 0x29 refused; request[2] = 0x00000129 0x…
-```
+The acceptance sequence is an actual efivarfs mount, a guest
+`efibootmgr --create` with exit status 0, and a **separate cold boot** using
+the saved firmware-written NOR. The second guest must list the same entry
+and loader, select it as `BootCurrent`, and reach `localhost login:`.
+A warm reset, host-side NOR editing, or a create command echoed without its
+result is not persistence evidence. NVMe is snapshot-per-run; firmware
+variables persist through the NOR state file, not through disk writes.
 
-That is the only sound starting point: a service implemented from its own refused requests is
-reconstructed from evidence, while a service implemented from a guess about what a ROT "probably" does
-is how the firmware was crashed before.
+## Security boundary
 
-## Order of work
+Neither the synthetic loader nor functional ROT replies authenticate the
+vendor UEFI/STMM images. Those unchanged images execute their own variable
+and image-verification code, but there is no authenticated silicon-to-firmware
+chain in this model. See the
+[Secure Boot provenance boundary](linux-under-the-profile.md#secure-boot-provenance-boundary).
 
-1. **Capture both services.** Run the firmware boot with the model's log enabled and record every
-   `service 0x12` and `service 0x29` request with its full payload: which words are constants, which
-   are addresses, which change between boots, and what the caller does with the reply it gets back.
-   Two runs are the minimum, because one run cannot distinguish a constant from a value that happened
-   to be constant.
-2. **Name the request shape.** From the payload and the caller's subsequent behaviour, write down the
-   request and reply layout before implementing anything. If the shape cannot be named from two
-   captures, capture more — do not interpolate.
-3. **Implement only what the capture shows**, one service at a time, each with a probe that exercises
-   the exchange through the transport rather than asserting on source text. `0x29` is the smaller
-   request (one payload word observed) and is the first one to attempt.
-4. **Then remove `efi=noruntime` from the profile command line** and assert the milestone that has never
-   held: the guest mounts `efivars` and `efibootmgr` lists and creates an entry. Until that asserts, the
-   profile keeps the flag and the limitation is stated rather than papered over — which is what
-   `docs/linux-under-the-profile.md` already records.
-5. **Re-run the installer** afterwards: its last failing step is `efibootmgr --create`, so a working
-   variable service should turn `Error: Failed to find the newly created Ubuntu entry` into a success,
-   and that is a far better proof than any unit test.
-
-## What this will not do
-
-It will not make the profile authenticate anything. A ROT service that returns a well-formed answer to
-a firmware caller is a functional model, not a security boundary, and nothing here should be described
-as secure boot or measured boot. The value is that the firmware's own code paths stop failing for want
-of an answer, which is what a fidelity emulator is for.
 
 ## What the first functional answer changed, measured
 
@@ -93,37 +88,146 @@ spark ROT: service 0x12 refused; request[4] = 0x00000312 0x90000000 0x00000001 0
 
 Three observations, none of them inference:
 
-- **The fourth word changes between calls** — `0xfcc40d97` then `0xb6db6764` — so `0x12` is asked about a
-  value that varies, which is what a digest or checksum of an address range looks like.
+- **The fourth word changes between calls** — `0xfcc40d97` then `0xb6db6764`.
+  A digest/checksum interpretation is **[INFERENCE]**, not an identified
+  cryptographic algorithm or an established service semantic.
 - **The communication buffer's status byte moves** (`0x28`, `0x8d`, `0x44`) where it was frozen while the
   services were refused. The earlier claim that the buffer was byte-identical on every retry holds only
   under the refusing transport, and is corrected here.
 - **The firmware passes the checkpoint it used to hang at** (`A9`, `AB`) and reaches the setup UI.
 
-What that does *not* establish is that a boot completes: the setup UI appeared in a run where this
-harness also typed ESC at the firmware's `Press <DEL>` prompt, and ESC is how AMI enters Setup. The
-harness therefore grew `--no-setup-escape`, so our own keypress cannot be mistaken for the firmware's
-behaviour, and the disk-boot question is being re-asked with it suppressed. A functional ROT answer is
-still not an authentication boundary and nothing here claims one.
+That first capture established only checkpoint progress and setup: the harness
+also typed ESC at `Press <DEL>`, which can enter AMI Setup. The later
+`--no-setup-escape` installed-disk boots independently establish Linux startup,
+runtime writes and UEFI image-signature enforcement. They still do not establish
+ROT authentication or its complete reply contract.
 
 ## The request shape, as far as the captures support it
 
-Both services carry a leading word whose low byte is the service id and whose upper bits are a length
-or count field; the words after it are the arguments. Measured, not inferred:
+The raw request words are measured; interpretation of their fields is not
+an identified protocol specification. Retained host diagnostics in
+`20261111T093421.135412Z/qemu.log` lines 40–41 and 106–119 show:
 
-| service | request words | repeats |
+| service | request words | observed variations |
 | --- | --- | --- |
-| `0x29` | `0x00000129 0x90000000` | once per boot |
-| `0x12` | `0x00000312 0x90000000 0x00000001 0xfcc40d97` then `… 0xb6db6764` | twice, with a different fourth word |
+| `0x29` | `0x00000129 0x90000000` | repeated later in the same capture; not necessarily once per boot |
+| `0x12` | `0x00000312 0x90000000 0x00000001 0xfcc40d97` | third word `1` or `2`; fourth word `0xfcc40d97`, `0xb6db6764` or `0x64a0ea5f` |
 
-What that supports: `0x29` is asked once, with one argument (`0x90000000`, an address in the secure
-region); `0x12` is asked about a 32-bit value that differs between calls at the same address with the same
-second word, which is the shape of a digest or checksum request rather than a read. What it does **not**
-support is a reply format: the functional transport answers status 0 with no payload words, and the
-firmware's own subsequent behaviour is the only evidence for whether that was enough — which is what the
-checkpoint advance and the moving buffer status showed.
+Those are QEMU transport diagnostics, not guest UART output; no claim is
+made that they appeared in `serial.log`. The earlier two-call example
+above is a subset, not an exhaustive per-boot count.
 
-Naming a reply layout from these captures alone would be a guess, and guessing at this interface is what
-took the firmware down once before. The honest state is: request shape measured, reply shape still
-unknown beyond "status 0 is accepted".
+The leading words encode the observed service id in the low byte, with `1`
+or `3` in the next byte matching the number of following argument words.
+That count interpretation is **[INFERENCE]**. `0x29` has one observed
+argument, `0x90000000`, in the model's secure memory. `0x12` has the same
+address, a third word of `1` or `2`, and a varying fourth word. Whether
+that last word is a checksum, digest fragment, token or another field
+is **unverified**.
 
+The **reply shape is unknown beyond "status 0 is accepted"** on this observed
+path. The functional transport supplies no payload words. Checkpoint progress
+and a working variable service do not prove that an empty success reply is
+correct on real hardware or for another request.
+
+To settle the contract, retain paired request/reply captures from a real ROT
+for these exact words, including mailbox length/status, every response word,
+and any memory modified at `0x90000000`, then trace the vendor caller's
+post-reply loads/branches to distinguish ignored fields from validated ones.
+An identified vendor implementation or authoritative protocol specification
+could supply the same missing information. Only then can executable
+request/reply and negative-case probes validate a functional implementation;
+returning status 0 alone is not that implementation.
+
+## Fresh runtime create and cold-boot persistence
+
+The creation run is **`20261112T060832.086295Z`**, using unchanged vendor
+UEFI/STMM **2.155.11**, the installed NVMe image, `--memory 2G`,
+`--rot-functional --no-setup-escape --ffa-ec --flash-trace`, and a separate
+copy of the Secure-Boot-on NOR. The accepted on/off stores were not
+modified. Its authenticated serial session records these actual outputs
+in `serial.log` (ANSI stripped):
+
+```text
+RUNTIME_ROOT_UID=0
+EFIVARFS_MOUNT_RC=0
+efivarfs efivarfs /sys/firmware/efi/efivars
+EFIBOOTMGR_CREATE_RC=0
+Boot0006* Spark runtime persistence	HD(1,GPT,6d265c09-2096-4d95-818a-f43e623bf1fd,0x800,0x95000)/File(\EFI\ubuntu\shimaa64.efi)
+```
+
+The mount result follows an explicit unmount and
+`mount -t efivarfs efivarfs /sys/firmware/efi/efivars`, not just the
+presence of an empty directory. The create result follows:
+
+```sh
+efibootmgr --create --disk /dev/nvme0n1 --part 1 \
+    --label 'Spark runtime persistence' --loader '\EFI\ubuntu\shimaa64.efi'
+```
+
+During that command, the trace records the actual runtime request:
+
+```text
+RELAY-IN ep=0x0000000000008004 elr3=0x0000000087991f08 spsr3=0x0000000061402009 w=0x00000000c400006f,0x0000000000008004,0x0000000000000000,0x00000000c4000041,0x0000000000000000,0x00000000933e0000,0x0000000000000000,0x0000000000000000,
+FLASH cmd=01 req=000000b4 addr=0000000003003408 count=ffffffff status=00
+```
+
+The frame is FF-A `DIRECT_REQ`, NS endpoint 0 to STMM `0x8004`,
+MM-communication selector `0xc4000041`, pointer `0x933e0000`.
+The real STMM response is relayed back as `DIRECT_RESP` with
+`x3=0xc4000061`; the separate flash command is handled through the
+existing trusted `0x8004` → `0x8002` flash path. No guest variable
+payload or successful EFI reply is invented by the monitor.
+
+The harness was stopped normally, saving firmware-written NOR with
+SHA-256 `6ade9633815de759c713584f82ea943f8cf130a05442291c748be60965afd861`.
+The original guest root hash was preserved before temporarily replacing
+only that isolated disk's root-password hash for authenticated serial
+access; the transient password was not retained in the captures.
+
+### Separate-process cold boot
+
+The first harness and QEMU exited with status 0. A new `boot_spark.py`
+process then cold-booted **`20261112T063956.565964Z`** from the same saved
+NOR, with the same arguments except that `--flash-trace` was omitted.
+Its `run.json` records the **same**
+`6ade9633815de759c713584f82ea943f8cf130a05442291c748be60965afd861`
+as `state_sha256_before`, equal to the creation run's
+`state_sha256_after`. This was not `reboot` inside one QEMU instance.
+
+That second `serial.log` records (ANSI stripped):
+
+```text
+localhost login: root
+COLD_ROOT_UID=0
+BootCurrent: 0006
+BootOrder: 0006,0002,0000
+Boot0006* Spark runtime persistence	HD(1,GPT,6d265c09-2096-4d95-818a-f43e623bf1fd,0x800,0x95000)/File(\EFI\ubuntu\shimaa64.efi)
+COLD_EFIBOOTMGR_RC=0
+efivarfs efivarfs /sys/firmware/efi/efivars
+```
+
+The entry **survived a cold boot and was selected as BootCurrent**, with
+the non-fallback loader `\EFI\ubuntu\shimaa64.efi`. The earlier
+`Boot0000` entry still names `\EFI\BOOT\BOOTAA64.EFI`; it is not the
+selected entry in this run. Removable-media fallback remains available
+when firmware does not choose a usable NVRAM option, but it is no longer
+the only demonstrated boot path.
+
+The cold harness also exited with status 0. The isolated disk's original
+root hash was restored byte-for-byte after both guests stopped. No
+password, private key, source-disk modification or raw execution capture
+is committed. Each ignored run retains `runtime-variable-evidence.json`
+with original-log hashes, ANSI-stripped line numbers, exact positive
+outputs and the matching NOR custody hashes. The source disk is otherwise
+read-only to these snapshot-per-run guests; the independent proof NOR
+retains the new entry.
+
+No additional variable-service implementation was necessary: the existing
+relay, real STMM, flash model and permission-context fix satisfy this
+path. The only monitor-source change for this evidence is correcting a
+stale comment that called the endpoint unserved. Installer reinstallation,
+all variable attributes/authentication cases, crash/power-loss recovery
+and FF-A conformance are **not revalidated** by this experiment. The ROT,
+optional-context, SMMU, eSPI and firmware-authentication limits remain as
+[documented separately](boot-status.md#remaining-platform-limits-and-evidence-boundaries).

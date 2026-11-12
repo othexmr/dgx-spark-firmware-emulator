@@ -123,7 +123,7 @@ needs the platform interfaces exercised by its firmware.
 - [QEMU profile and compatibility NIC](qemu/README.md)
 - [Monitor, flash, clock and entropy services](monitor/README.md)
 - [FF-A sharing and STMM's communication-buffer contract](docs/mm-sharing.md)
-- [The EFI runtime variable service: what fails, and the order to implement it](docs/runtime-variables.md)
+- [EFI runtime variables: real STMM relay, creation and cold-boot persistence](docs/runtime-variables.md)
 - [Development, diagnostics and hardware collection](docs/development.md)
 - [What the vendor capsule contains](docs/hardware-findings.md) — the component map's declared base, the FF-A
   manifests inside `STMM`/`FLASH`/`ESPI`, and why fifteen components are encrypted
